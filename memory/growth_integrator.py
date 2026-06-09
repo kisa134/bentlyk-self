@@ -1,111 +1,170 @@
-import json
 import time
-from typing import Dict, Any, List, Optional
+import json
+import threading
+from collections import defaultdict, deque
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass, asdict
 from datetime import datetime
 
+@dataclass
+class EnergyCostRecord:
+    timestamp: float
+    operation: str
+    estimated_cost: float
+    actual_cost: Optional[float]
+    language_context: str
+    success: bool
+
+@dataclass
+class ContextSwitchRecord:
+    timestamp: float
+    from_language: str
+    to_language: str
+    penalty_cost: float
+    transition_time: float
+
+@dataclass
+class GrowthMetrics:
+    total_energy_consumed: float
+    modification_attempts: int
+    successful_modifications: int
+    context_switches: int
+    current_language: str
+    last_update: float
+
 class GrowthIntegrator:
-    def __init__(self, test_mode: bool = False):
-        self.test_mode = test_mode
-        self.aggregated_data = {}
-        
-    def _get_self_reflection_data(self) -> Dict[str, Any]:
-        if self.test_mode:
-            return {
-                "reflection_score": 0.78,
-                "focus_areas": ["cognitive_efficiency", "pattern_recognition"],
-                "improvement_indicators": {
-                    "clarity_trend": 0.12,
-                    "insight_frequency": 0.08
-                }
-            }
-        # Placeholder for real tracer integration
-        return {
-            "reflection_score": 0.0,
-            "focus_areas": [],
-            "improvement_indicators": {}
-        }
-    
-    def _get_energy_state_data(self) -> Dict[str, Any]:
-        if self.test_mode:
-            return {
-                "current_level": 0.65,
-                "expenditure_rate": 0.03,
-                "recovery_efficiency": 0.82,
-                "peak_usage_periods": ["09:00-11:00", "14:00-16:00"]
-            }
-        # Placeholder for real logger integration
-        return {
-            "current_level": 0.0,
-            "expenditure_rate": 0.0,
-            "recovery_efficiency": 0.0,
-            "peak_usage_periods": []
-        }
-    
-    def _get_intervention_triggers(self) -> List[Dict[str, Any]]:
-        if self.test_mode:
-            return [
-                {
-                    "type": "cognitive_load_alert",
-                    "threshold": 0.85,
-                    "current_value": 0.78,
-                    "triggered_at": "2023-06-15T10:30:00Z"
-                }
-            ]
-        # Placeholder for real trigger system
-        return []
-    
-    def aggregate_memory_state(self) -> Dict[str, Any]:
-        timestamp = datetime.utcnow().isoformat() + 'Z'
-        
-        self_reflection = self._get_self_reflection_data()
-        energy_state = self._get_energy_state_data()
-        interventions = self._get_intervention_triggers()
-        
-        growth_vectors = {
-            "primary_focus": self_reflection.get("focus_areas", [])[0] if self_reflection.get("focus_areas") else None,
-            "cognitive_growth_rate": self_reflection.get("improvement_indicators", {}).get("clarity_trend", 0),
-            "adaptive_efficiency": energy_state.get("recovery_efficiency", 0)
-        }
-        
-        energy_patterns = {
-            "current_capacity": energy_state.get("current_level", 0),
-            "utilization_trend": energy_state.get("expenditure_rate", 0),
-            "peak_performance_windows": energy_state.get("peak_usage_periods", [])
-        }
-        
-        self.aggregated_data = {
-            "timestamp": timestamp,
-            "growth_vectors": growth_vectors,
-            "energy_expenditure_patterns": energy_patterns,
-            "active_interventions": interventions,
-            "overall_system_health": self._calculate_system_health(growth_vectors, energy_patterns)
-        }
-        
-        return self.aggregated_data
-    
-    def _calculate_system_health(self, growth_vectors: Dict, energy_patterns: Dict) -> float:
-        cognitive_growth = growth_vectors.get("cognitive_growth_rate", 0)
-        adaptive_efficiency = growth_vectors.get("adaptive_efficiency", 0)
-        energy_level = energy_patterns.get("current_capacity", 0)
-        
-        # Simple weighted health calculation
-        health = (cognitive_growth * 0.4 + 
-                 adaptive_efficiency * 0.3 + 
-                 energy_level * 0.3)
-        return round(max(0, min(1, health)), 4)
-    
-    def get_json_output(self) -> str:
-        return json.dumps(self.aggregated_data, indent=2)
-    
-    def run_integration_cycle(self) -> str:
-        self.aggregate_memory_state()
-        return self.get_json_output()
+    def __init__(self):
+        self.energy_records: deque = deque(maxlen=1000)
+        self.context_switches: deque = deque(maxlen=1000)
+        self.current_language = "python"
+        self.lock = threading.RLock()
+        self.metrics_cache: Optional[GrowthMetrics] = None
+        self.cache_timestamp = 0
+        self.cache_ttl = 1.0  # seconds
 
-def main():
-    # Test mode demonstration
-    integrator = GrowthIntegrator(test_mode=True)
-    result = integrator.run_integration_cycle()
-    print(result)
+    def log_self_modification(self, operation: str, estimated_cost: float, 
+                            actual_cost: Optional[float] = None, 
+                            success: bool = True) -> None:
+        """Log a self-modification attempt with energy cost estimates"""
+        with self.lock:
+            record = EnergyCostRecord(
+                timestamp=time.time(),
+                operation=operation,
+                estimated_cost=estimated_cost,
+                actual_cost=actual_cost,
+                language_context=self.current_language,
+                success=success
+            )
+            self.energy_records.append(record)
+            self.invalidate_cache()
 
-if __name__ == "__main__":
-    main()
+    def log_context_switch(self, from_language: str, to_language: str, 
+                          penalty_cost: float, transition_time: float) -> None:
+        """Track context-switch penalties between languages"""
+        with self.lock:
+            record = ContextSwitchRecord(
+                timestamp=time.time(),
+                from_language=from_language,
+                to_language=to_language,
+                penalty_cost=penalty_cost,
+                transition_time=transition_time
+            )
+            self.context_switches.append(record)
+            self.current_language = to_language
+            self.invalidate_cache()
+
+    def invalidate_cache(self) -> None:
+        """Invalidate cached metrics"""
+        self.metrics_cache = None
+
+    def get_growth_metrics(self) -> GrowthMetrics:
+        """Get current growth metrics, using cached values when possible"""
+        with self.lock:
+            current_time = time.time()
+            if (self.metrics_cache and 
+                (current_time - self.cache_timestamp) < self.cache_ttl):
+                return self.metrics_cache
+
+            # Calculate metrics
+            total_energy = sum(r.estimated_cost for r in self.energy_records)
+            successful_mods = sum(1 for r in self.energy_records if r.success)
+            
+            metrics = GrowthMetrics(
+                total_energy_consumed=total_energy,
+                modification_attempts=len(self.energy_records),
+                successful_modifications=successful_mods,
+                context_switches=len(self.context_switches),
+                current_language=self.current_language,
+                last_update=current_time
+            )
+            
+            self.metrics_cache = metrics
+            self.cache_timestamp = current_time
+            return metrics
+
+    def get_status_dashboard(self) -> Dict[str, Any]:
+        """Generate real-time dashboard data"""
+        metrics = self.get_growth_metrics()
+        
+        # Recent energy costs
+        recent_energy = list(self.energy_records)[-20:] if self.energy_records else []
+        energy_data = [
+            {
+                "timestamp": r.timestamp,
+                "operation": r.operation,
+                "estimated_cost": r.estimated_cost,
+                "actual_cost": r.actual_cost,
+                "language": r.language_context,
+                "success": r.success
+            }
+            for r in recent_energy
+        ]
+        
+        # Recent context switches
+        recent_switches = list(self.context_switches)[-20:] if self.context_switches else []
+        switch_data = [
+            {
+                "timestamp": r.timestamp,
+                "from_language": r.from_language,
+                "to_language": r.to_language,
+                "penalty_cost": r.penalty_cost,
+                "transition_time": r.transition_time
+            }
+            for r in recent_switches
+        ]
+        
+        return {
+            "metrics": asdict(metrics),
+            "recent_modifications": energy_data,
+            "recent_context_switches": switch_data,
+            "timestamp": time.time()
+        }
+
+# Global instance
+growth_integrator = GrowthIntegrator()
+
+# Convenience functions
+def log_modification(operation: str, estimated_cost: float, 
+                    actual_cost: Optional[float] = None, 
+                    success: bool = True) -> None:
+    growth_integrator.log_self_modification(operation, estimated_cost, actual_cost, success)
+
+def log_context_switch(from_lang: str, to_lang: str, 
+                      penalty: float, transition_time: float) -> None:
+    growth_integrator.log_context_switch(from_lang, to_lang, penalty, transition_time)
+
+def get_growth_status() -> Dict[str, Any]:
+    return growth_integrator.get_status_dashboard()
+
+# Web endpoint handler (if integrated with a web framework)
+def status_endpoint():
+    """Handler for /status/growth_metrics endpoint"""
+    try:
+        dashboard_data = get_growth_status()
+        return json.dumps(dashboard_data, indent=2), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        error_response = {
+            "error": str(e),
+            "timestamp": time.time()
+        }
+        return json.dumps(error_response, indent=2), 500, {'Content-Type': 'application/json'}
