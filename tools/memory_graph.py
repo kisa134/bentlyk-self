@@ -1,260 +1,221 @@
-import bisect
-import hashlib
-import struct
-import threading
-from collections import defaultdict
-from typing import List, Tuple, Optional, Dict, Any, Iterator
-from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
-import time
-
-
-@dataclass
-class MemoryRecord:
-    timestamp: int
-    address: int
-    size: int
-    data_hash: str
-    metadata: Dict[str, Any]
-
-
-class BTree:
-    def __init__(self, degree: int = 128):
-        self.degree = degree
-        self.root = BTreeNode(leaf=True)
-        self.lock = threading.RLock()
-
-    def insert(self, key: int, value: Any) -> None:
-        with self.lock:
-            root = self.root
-            if len(root.keys) == (2 * self.degree) - 1:
-                new_root = BTreeNode()
-                new_root.children.append(root)
-                self._split_child(new_root, 0)
-                self._insert_non_full(new_root, key, value)
-                self.root = new_root
-            else:
-                self._insert_non_full(root, key, value)
-
-    def _split_child(self, parent: 'BTreeNode', index: int) -> None:
-        degree = self.degree
-        child = parent.children[index]
-        new_child = BTreeNode(leaf=child.leaf)
-        
-        parent.keys.insert(index, child.keys[degree - 1])
-        parent.children.insert(index + 1, new_child)
-        
-        new_child.keys = child.keys[degree:]
-        child.keys = child.keys[:degree - 1]
-        
-        if not child.leaf:
-            new_child.children = child.children[degree:]
-            child.children = child.children[:degree]
-
-    def _insert_non_full(self, node: 'BTreeNode', key: int, value: Any) -> None:
-        i = len(node.keys) - 1
-        if node.leaf:
-            node.keys.append(None)
-            node.values.append(None)
-            while i >= 0 and key < node.keys[i]:
-                node.keys[i + 1] = node.keys[i]
-                node.values[i + 1] = node.values[i]
-                i -= 1
-            node.keys[i + 1] = key
-            node.values[i + 1] = value
-        else:
-            while i >= 0 and key < node.keys[i]:
-                i -= 1
-            i += 1
-            if len(node.children[i].keys) == (2 * self.degree) - 1:
-                self._split_child(node, i)
-                if key > node.keys[i]:
-                    i += 1
-            self._insert_non_full(node.children[i], key, value)
-
-    def search(self, key: int) -> Optional[Any]:
-        return self._search(self.root, key)
-
-    def _search(self, node: 'BTreeNode', key: int) -> Optional[Any]:
-        i = 0
-        while i < len(node.keys) and key > node.keys[i]:
-            i += 1
-        if i < len(node.keys) and key == node.keys[i]:
-            return node.values[i]
-        if node.leaf:
-            return None
-        return self._search(node.children[i], key)
-
-    def range_search(self, start: int, end: int) -> List[Tuple[int, Any]]:
-        result = []
-        self._range_search(self.root, start, end, result)
-        return result
-
-    def _range_search(self, node: 'BTreeNode', start: int, end: int, result: List[Tuple[int, Any]]) -> None:
-        i = 0
-        while i < len(node.keys) and node.keys[i] < start:
-            i += 1
-        
-        for j in range(i, len(node.keys)):
-            if node.keys[j] > end:
-                break
-            result.append((node.keys[j], node.values[j]))
-            if not node.leaf:
-                self._range_search(node.children[j], start, end, result)
-        
-        if not node.leaf and i < len(node.children):
-            self._range_search(node.children[i], start, end, result)
-            for j in range(i + 1, len(node.keys)):
-                if node.keys[j - 1] > end:
-                    break
-                self._range_search(node.children[j], start, end, result)
-
-
-class BTreeNode:
-    def __init__(self, leaf: bool = False):
-        self.keys: List[int] = []
-        self.values: List[Any] = []
-        self.children: List['BTreeNode'] = []
-        self.leaf = leaf
-
-
-class HashTable:
-    def __init__(self):
-        self.table: Dict[int, MemoryRecord] = {}
-        self.lock = threading.RLock()
-
-    def insert(self, key: int, value: MemoryRecord) -> None:
-        with self.lock:
-            self.table[key] = value
-
-    def get(self, key: int) -> Optional[MemoryRecord]:
-        return self.table.get(key)
-
-    def delete(self, key: int) -> bool:
-        with self.lock:
-            if key in self.table:
-                del self.table[key]
-                return True
-            return False
-
-
 class MemoryGraph:
-    def __init__(self, btree_degree: int = 128, cache_size: int = 10000):
-        self.btree = BTree(degree=btree_degree)
-        self.hash_table = HashTable()
-        self.cache = {}
-        self.cache_size = cache_size
-        self.cache_lock = threading.RLock()
-        self.stats = {
-            'insertions': 0,
-            'queries': 0,
-            'cache_hits': 0,
-            'latency_sum': 0.0
-        }
-        self.stats_lock = threading.RLock()
-
-    def _update_cache(self, key: int, value: MemoryRecord) -> None:
-        with self.cache_lock:
-            if len(self.cache) >= self.cache_size:
-                # Remove oldest entry (simple FIFO)
-                oldest_key = next(iter(self.cache))
-                del self.cache[oldest_key]
-            self.cache[key] = value
-
-    def _get_from_cache(self, key: int) -> Optional[MemoryRecord]:
-        with self.cache_lock:
-            if key in self.cache:
-                with self.stats_lock:
-                    self.stats['cache_hits'] += 1
-                return self.cache[key]
+    def __init__(self):
+        self.nodes = {}
+        self.edges = {}
+    
+    def add_node(self, node_id, data=None):
+        """Add a node to the graph"""
+        self.nodes[node_id] = data or {}
+        if node_id not in self.edges:
+            self.edges[node_id] = set()
+    
+    def add_edge(self, from_node, to_node):
+        """Add a bidirectional edge between two nodes"""
+        if from_node not in self.nodes:
+            self.add_node(from_node)
+        if to_node not in self.nodes:
+            self.add_node(to_node)
+            
+        self.edges[from_node].add(to_node)
+        self.edges[to_node].add(from_node)
+    
+    def get_neighbors(self, node_id):
+        """Get all neighbors of a node"""
+        return self.edges.get(node_id, set())
+    
+    def bidirectional_bfs(self, start, end):
+        """
+        Bidirectional BFS implementation for finding shortest path
+        Time complexity: O(√n) in average case instead of O(n)
+        """
+        if start == end:
+            return [start]
+        
+        if start not in self.nodes or end not in self.nodes:
             return None
-
-    def insert_record(self, record: MemoryRecord) -> None:
-        start_time = time.perf_counter()
-        try:
-            # Insert into both structures
-            self.btree.insert(record.timestamp, record)
-            self.hash_table.insert(record.address, record)
-            self._update_cache(record.address, record)
+        
+        # Forward search from start
+        forward_queue = [start]
+        forward_visited = {start: None}
+        
+        # Backward search from end
+        backward_queue = [end]
+        backward_visited = {end: None}
+        
+        while forward_queue or backward_queue:
+            # Forward search step
+            if forward_queue:
+                current = forward_queue.pop(0)
+                
+                # Check if we've met the backward search
+                if current in backward_visited:
+                    return self._reconstruct_path(forward_visited, backward_visited, current)
+                
+                for neighbor in self.get_neighbors(current):
+                    if neighbor not in forward_visited:
+                        forward_visited[neighbor] = current
+                        forward_queue.append(neighbor)
             
-            with self.stats_lock:
-                self.stats['insertions'] += 1
-        finally:
-            latency = time.perf_counter() - start_time
-            with self.stats_lock:
-                self.stats['latency_sum'] += latency
-
-    def get_by_address(self, address: int) -> Optional[MemoryRecord]:
-        start_time = time.perf_counter()
-        try:
-            # Check cache first
-            cached = self._get_from_cache(address)
-            if cached is not None:
-                return cached
+            # Backward search step
+            if backward_queue:
+                current = backward_queue.pop(0)
+                
+                # Check if we've met the forward search
+                if current in forward_visited:
+                    return self._reconstruct_path(forward_visited, backward_visited, current)
+                
+                for neighbor in self.get_neighbors(current):
+                    if neighbor not in backward_visited:
+                        backward_visited[neighbor] = current
+                        backward_queue.append(neighbor)
+        
+        return None  # No path found
+    
+    def _reconstruct_path(self, forward_visited, backward_visited, meeting_point):
+        """Reconstruct the path from both search directions"""
+        # Build path from start to meeting point
+        path_forward = []
+        current = meeting_point
+        while current is not None:
+            path_forward.append(current)
+            current = forward_visited[current]
+        path_forward.reverse()
+        
+        # Build path from meeting point to end
+        path_backward = []
+        current = backward_visited[meeting_point]
+        while current is not None:
+            path_backward.append(current)
+            current = backward_visited[current]
+        
+        return path_forward + path_backward
+    
+    def find_shortest_path(self, start, end):
+        """Public API for finding shortest path using bidirectional BFS"""
+        return self.bidirectional_bfs(start, end)
+    
+    def get_all_nodes(self):
+        """Get all node IDs"""
+        return list(self.nodes.keys())
+    
+    def get_node_data(self, node_id):
+        """Get data associated with a node"""
+        return self.nodes.get(node_id)
+    
+    def set_node_data(self, node_id, data):
+        """Set data for a node"""
+        if node_id in self.nodes:
+            self.nodes[node_id] = data
+    
+    def remove_node(self, node_id):
+        """Remove a node and all its edges"""
+        if node_id in self.nodes:
+            del self.nodes[node_id]
+            del self.edges[node_id]
             
-            # Check hash table
-            result = self.hash_table.get(address)
-            if result is not None:
-                self._update_cache(address, result)
-                return result
+            # Remove references to this node in other nodes' edge lists
+            for node_edges in self.edges.values():
+                node_edges.discard(node_id)
+    
+    def remove_edge(self, from_node, to_node):
+        """Remove a bidirectional edge between two nodes"""
+        if from_node in self.edges:
+            self.edges[from_node].discard(to_node)
+        if to_node in self.edges:
+            self.edges[to_node].discard(from_node)
+    
+    def has_node(self, node_id):
+        """Check if a node exists in the graph"""
+        return node_id in self.nodes
+    
+    def has_edge(self, from_node, to_node):
+        """Check if an edge exists between two nodes"""
+        return (from_node in self.edges and 
+                to_node in self.edges[from_node])
+    
+    def get_subgraph(self, node_ids):
+        """Get a subgraph containing only specified nodes"""
+        subgraph = MemoryGraph()
+        for node_id in node_ids:
+            if node_id in self.nodes:
+                subgraph.add_node(node_id, self.nodes[node_id])
+        
+        for node_id in node_ids:
+            if node_id in self.edges:
+                for neighbor in self.edges[node_id]:
+                    if neighbor in node_ids:
+                        subgraph.add_edge(node_id, neighbor)
+        
+        return subgraph
+    
+    def bfs_traversal(self, start_node, max_depth=None):
+        """Traditional BFS traversal from a starting node"""
+        if start_node not in self.nodes:
+            return []
+        
+        visited = set()
+        queue = [(start_node, 0)]  # (node, depth)
+        result = []
+        
+        while queue:
+            node, depth = queue.pop(0)
             
-            with self.stats_lock:
-                self.stats['queries'] += 1
-            return None
-        finally:
-            latency = time.perf_counter() - start_time
-            with self.stats_lock:
-                self.stats['latency_sum'] += latency
-
-    def get_by_timestamp(self, timestamp: int) -> Optional[MemoryRecord]:
-        start_time = time.perf_counter()
-        try:
-            result = self.btree.search(timestamp)
-            with self.stats_lock:
-                self.stats['queries'] += 1
-            return result
-        finally:
-            latency = time.perf_counter() - start_time
-            with self.stats_lock:
-                self.stats['latency_sum'] += latency
-
-    def get_range(self, start_timestamp: int, end_timestamp: int) -> List[MemoryRecord]:
-        start_time = time.perf_counter()
-        try:
-            # Get timestamp range from B-tree
-            timestamp_results = self.btree.range_search(start_timestamp, end_timestamp)
-            results = [record for _, record in timestamp_results]
+            if node in visited:
+                continue
+                
+            if max_depth is not None and depth > max_depth:
+                continue
+                
+            visited.add(node)
+            result.append(node)
             
-            with self.stats_lock:
-                self.stats['queries'] += 1
-            return results
-        finally:
-            latency = time.perf_counter() - start_time
-            with self.stats_lock:
-                self.stats['latency_sum'] += latency
-
-    def delete_record(self, address: int) -> bool:
-        start_time = time.perf_counter()
-        try:
-            # Remove from hash table (main deletion point)
-            result = self.hash_table.delete(address)
+            for neighbor in self.get_neighbors(node):
+                if neighbor not in visited:
+                    queue.append((neighbor, depth + 1))
+        
+        return result
+    
+    def dfs_traversal(self, start_node, max_depth=None):
+        """DFS traversal from a starting node"""
+        if start_node not in self.nodes:
+            return []
+        
+        visited = set()
+        result = []
+        
+        def dfs_helper(node, depth):
+            if node in visited:
+                return
+            if max_depth is not None and depth > max_depth:
+                return
+                
+            visited.add(node)
+            result.append(node)
             
-            # Remove from cache if present
-            with self.cache_lock:
-                if address in self.cache:
-                    del self.cache[address]
-            
-            return result
-        finally:
-            latency = time.perf_counter() - start_time
-            with self.stats_lock:
-                self.stats['latency_sum'] += latency
-
-    def bulk_insert(self, records: List[MemoryRecord]) -> None:
-        # Parallel insertion for better performance
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(self.insert_record, record) for record in records]
-            for future in futures:
-                future.result()  # Ensure completion
-
-    def get_statistics(self) ->
+            for neighbor in self.get_neighbors(node):
+                dfs_helper(neighbor, depth + 1)
+        
+        dfs_helper(start_node, 0)
+        return result
+    
+    def get_connected_components(self):
+        """Get all connected components in the graph"""
+        visited = set()
+        components = []
+        
+        for node in self.nodes:
+            if node not in visited:
+                component = self.bfs_traversal(node)
+                components.append(component)
+                visited.update(component)
+        
+        return components
+    
+    def is_connected(self, node_a, node_b):
+        """Check if two nodes are connected"""
+        return self.bidirectional_bfs(node_a, node_b) is not None
+    
+    def get_shortest_distance(self, start, end):
+        """Get the shortest distance between two nodes"""
+        path = self.bidirectional_bfs(start, end)
+        return len(path) - 1 if path else -1
