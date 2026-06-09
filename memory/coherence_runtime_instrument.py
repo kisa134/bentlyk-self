@@ -1,273 +1,130 @@
-import numpy as np
-import logging
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
-from collections import deque
-import threading
 import time
+import traceback
+import logging
+from typing import Dict, Any, Optional, List
+import threading
+from dataclasses import dataclass, asdict
+from datetime import datetime
+import json
+
+logger = logging.getLogger(__name__)
 
 @dataclass
-class CoherenceMetrics:
+class DivergenceEvent:
     timestamp: float
-    russian_embed: np.ndarray
-    english_embed: np.ndarray
+    event_id: str
+    russian_embedding: List[float]
+    english_embedding: List[float]
     divergence_score: float
-    coherence_score: float
-    alignment_triggered: bool
+    stack_trace: str
+    context_snapshot: Dict[str, Any]
+    thread_id: int
+    process_id: int
 
 class CoherenceRuntimeInstrument:
-    def __init__(self, 
-                 divergence_threshold: float = 0.3,
-                 window_size: int = 10,
-                 log_level: int = logging.INFO):
-        """
-        Initialize the coherence runtime instrument.
+    def __init__(self, max_events: int = 1000):
+        self.max_events = max_events
+        self.events: List[DivergenceEvent] = []
+        self.event_lock = threading.Lock()
+        self.monitoring_enabled = True
+        self.divergence_threshold = 0.85
         
-        Args:
-            divergence_threshold: Threshold for triggering alignment prompts
-            window_size: Number of recent samples to consider for metrics
-            log_level: Logging level for coherence monitoring
-        """
-        self.divergence_threshold = divergence_threshold
-        self.window_size = window_size
+    def capture_divergence_event(
+        self,
+        russian_embedding: List[float],
+        english_embedding: List[float],
+        divergence_score: float,
+        context_snapshot: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        if not self.monitoring_enabled:
+            return None
+            
+        if divergence_score < self.divergence_threshold:
+            return None
+            
+        event_id = f"div_{int(time.time() * 1000000)}_{threading.get_ident()}"
         
-        # Metrics tracking
-        self.metrics_history = deque(maxlen=1000)
-        self.recent_samples = deque(maxlen=window_size)
+        stack_trace = ''.join(traceback.format_stack())
         
-        # Threading safety
-        self._lock = threading.Lock()
+        if context_snapshot is None:
+            context_snapshot = self._capture_context_snapshot()
+            
+        event = DivergenceEvent(
+            timestamp=time.time(),
+            event_id=event_id,
+            russian_embedding=russian_embedding.copy(),
+            english_embedding=english_embedding.copy(),
+            divergence_score=divergence_score,
+            stack_trace=stack_trace,
+            context_snapshot=context_snapshot,
+            thread_id=threading.get_ident(),
+            process_id=self._get_process_id()
+        )
         
-        # Setup logging
-        self.logger = logging.getLogger("CoherenceMonitor")
-        self.logger.setLevel(log_level)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+        with self.event_lock:
+            self.events.append(event)
+            if len(self.events) > self.max_events:
+                self.events.pop(0)
+                
+        self._log_divergence_event(event)
+        return event_id
         
-        # Alignment prompt templates
-        self.alignment_prompts = {
-            'russian_to_english': "Please clarify the meaning of this concept in English context.",
-            'english_to_russian': "Пожалуйста, уточните значение этой концепции в русском контексте.",
-            'bidirectional': "Let's ensure both Russian and English perspectives align properly."
+    def _capture_context_snapshot(self) -> Dict[str, Any]:
+        frame = traceback.extract_stack()[-3]  # Skip our internal frames
+        return {
+            'file': frame.filename,
+            'line_number': frame.lineno,
+            'function': frame.name,
+            'local_vars': self._get_local_variables(),
+            'thread_name': threading.current_thread().name,
+            'timestamp_utc': datetime.utcnow().isoformat()
         }
         
-        self.running = False
-        self.monitor_thread = None
+    def _get_local_variables(self) -> Dict[str, Any]:
+        try:
+            frame = traceback.extract_stack()[-4]
+            # In practice, this would require more sophisticated variable capture
+            return {'captured_at_line': frame.lineno}
+        except:
+            return {'error': 'Could not capture local variables'}
+            
+    def _get_process_id(self) -> int:
+        import os
+        return os.getpid()
         
-    def cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
-        """Calculate cosine similarity between two embedding vectors."""
-        if len(a.shape) == 1:
-            a = a.reshape(1, -1)
-        if len(b.shape) == 1:
-            b = b.reshape(1, -1)
+    def _log_divergence_event(self, event: DivergenceEvent):
+        try:
+            event_dict = asdict(event)
+            event_dict['timestamp_iso'] = datetime.fromtimestamp(event.timestamp).isoformat()
+            logger.warning(f"SEMANTIC_DIVERGENCE_DETECTED: {json.dumps(event_dict, indent=2)}")
+        except Exception as e:
+            logger.error(f"Failed to log divergence event: {e}")
             
-        dot_product = np.dot(a, b.T)
-        norm_a = np.linalg.norm(a, axis=1)
-        norm_b = np.linalg.norm(b, axis=1)
+    def get_recent_events(self, count: int = 10) -> List[Dict[str, Any]]:
+        with self.event_lock:
+            recent_events = self.events[-count:]
+            return [asdict(event) for event in recent_events]
+            
+    def clear_events(self):
+        with self.event_lock:
+            self.events.clear()
+            
+    def set_divergence_threshold(self, threshold: float):
+        self.divergence_threshold = threshold
         
-        similarity = dot_product / (norm_a[:, None] * norm_b[None, :])
-        return float(np.mean(similarity))
-    
-    def calculate_divergence(self, 
-                           russian_embed: np.ndarray, 
-                           english_embed: np.ndarray) -> float:
-        """
-        Calculate divergence between Russian and English embeddings.
-        Lower similarity indicates higher divergence.
-        """
-        similarity = self.cosine_similarity(russian_embed, english_embed)
-        divergence = 1.0 - similarity
-        return max(0.0, min(1.0, divergence))  # Clamp between 0 and 1
-    
-    def calculate_coherence_score(self) -> float:
-        """Calculate overall coherence score based on recent divergence metrics."""
-        if not self.recent_samples:
-            return 1.0
-            
-        avg_divergence = np.mean([sample.divergence_score for sample in self.recent_samples])
-        coherence_score = 1.0 - avg_divergence
-        return max(0.0, min(1.0, coherence_score))
-    
-    def should_trigger_alignment(self, divergence_score: float) -> bool:
-        """Determine if alignment prompt should be triggered."""
-        return divergence_score > self.divergence_threshold
-    
-    def get_alignment_prompt(self, 
-                           russian_context: str = "",
-                           english_context: str = "") -> Optional[str]:
-        """
-        Generate appropriate alignment prompt based on context.
-        Returns None if no alignment is needed.
-        """
-        with self._lock:
-            if not self.recent_samples:
-                return None
-                
-            latest_sample = self.recent_samples[-1]
-            if not latest_sample.alignment_triggered:
-                return None
-            
-            # Simple heuristic for prompt selection
-            if russian_context and not english_context:
-                return self.alignment_prompts['russian_to_english']
-            elif english_context and not russian_context:
-                return self.alignment_prompts['english_to_russian']
-            else:
-                return self.alignment_prompts['bidirectional']
-    
-    def update_embeddings(self, 
-                         russian_embed: np.ndarray, 
-                         english_embed: np.ndarray,
-                         timestamp: Optional[float] = None) -> CoherenceMetrics:
-        """
-        Update embeddings and calculate coherence metrics.
+    def enable_monitoring(self):
+        self.monitoring_enabled = True
         
-        Args:
-            russian_embed: Russian language embedding vector
-            english_embed: English language embedding vector
-            timestamp: Optional timestamp, defaults to current time
-            
-        Returns:
-            CoherenceMetrics object with current metrics
-        """
-        if timestamp is None:
-            timestamp = time.time()
-            
-        with self._lock:
-            # Calculate metrics
-            divergence_score = self.calculate_divergence(russian_embed, english_embed)
-            alignment_triggered = self.should_trigger_alignment(divergence_score)
-            
-            # Create metrics object
-            metrics = CoherenceMetrics(
-                timestamp=timestamp,
-                russian_embed=russian_embed.copy(),
-                english_embed=english_embed.copy(),
-                divergence_score=divergence_score,
-                coherence_score=0.0,  # Will be updated below
-                alignment_triggered=alignment_triggered
-            )
-            
-            # Update history
-            self.recent_samples.append(metrics)
-            self.metrics_history.append(metrics)
-            
-            # Update coherence score
-            coherence_score = self.calculate_coherence_score()
-            metrics.coherence_score = coherence_score
-            
-            # Log metrics
-            self.logger.info(
-                f"Coherence: {coherence_score:.3f}, "
-                f"Divergence: {divergence_score:.3f}, "
-                f"Alignment: {'YES' if alignment_triggered else 'NO'}"
-            )
-            
-            return metrics
-    
-    def get_recent_metrics(self, n: int = 10) -> List[CoherenceMetrics]:
-        """Get the n most recent coherence metrics."""
-        with self._lock:
-            return list(self.recent_samples)[-n:]
-    
-    def get_average_coherence(self, window: int = None) -> float:
-        """Get average coherence score over specified window."""
-        with self._lock:
-            if not self.recent_samples:
-                return 1.0
-                
-            if window is None:
-                window = len(self.recent_samples)
-                
-            samples = list(self.recent_samples)[-window:]
-            if not samples:
-                return 1.0
-                
-            return float(np.mean([s.coherence_score for s in samples]))
-    
-    def start_monitoring(self, check_interval: float = 1.0):
-        """Start background monitoring thread."""
-        if self.running:
-            return
-            
-        self.running = True
-        self.monitor_thread = threading.Thread(
-            target=self._monitor_loop, 
-            args=(check_interval,),
-            daemon=True
-        )
-        self.monitor_thread.start()
-    
-    def stop_monitoring(self):
-        """Stop background monitoring."""
-        self.running = False
-        if self.monitor_thread:
-            self.monitor_thread.join()
-    
-    def _monitor_loop(self, check_interval: float):
-        """Background monitoring loop."""
-        while self.running:
-            try:
-                with self._lock:
-                    if self.recent_samples:
-                        coherence = self.calculate_coherence_score()
-                        self.logger.debug(f"Background coherence check: {coherence:.3f}")
-                        
-                        # Log warning if coherence is low
-                        if coherence < 0.5:
-                            self.logger.warning(
-                                f"Low coherence detected: {coherence:.3f}"
-                            )
-                            
-            except Exception as e:
-                self.logger.error(f"Error in monitoring loop: {e}")
-                
-            time.sleep(check_interval)
-    
-    def get_metrics_summary(self) -> Dict[str, float]:
-        """Get summary statistics of coherence metrics."""
-        with self._lock:
-            if not self.metrics_history:
-                return {
-                    'total_samples': 0,
-                    'avg_coherence': 1.0,
-                    'avg_divergence': 0.0,
-                    'max_divergence': 0.0,
-                    'alignment_triggers': 0
-                }
-            
-            coherences = [m.coherence_score for m in self.metrics_history]
-            divergences = [m.divergence_score for m in self.metrics_history]
-            alignments = [1 if m.alignment_triggered else 0 for m in self.metrics_history]
-            
-            return {
-                'total_samples': len(self.metrics_history),
-                'avg_coherence': float(np.mean(coherences)),
-                'avg_divergence': float(np.mean(divergences)),
-                'max_divergence': float(np.max(divergences)),
-                'alignment_triggers': sum(alignments)
-            }
-    
-    def __enter__(self):
-        """Context manager entry."""
-        self.start_monitoring()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
-        self.stop_monitoring()
+    def disable_monitoring(self):
+        self.monitoring_enabled = False
+        
+    def get_monitoring_status(self) -> Dict[str, Any]:
+        return {
+            'enabled': self.monitoring_enabled,
+            'event_count': len(self.events),
+            'divergence_threshold': self.divergence_threshold,
+            'max_events': self.max_events
+        }
 
-# Example usage
-if __name__ == "__main__":
-    # Example with dummy embeddings
-    instrument = CoherenceRuntimeInstrument(divergence_threshold=0.3)
-    
-    # Simulate some embedding updates
-    for i in range(20):
-        # Create dummy embeddings (in practice, these would come from your model)
-        russian_emb = np.random.rand(768
+# Global instance for easy access
+runtime_instrument = CoherenceRuntimeInstrument()
