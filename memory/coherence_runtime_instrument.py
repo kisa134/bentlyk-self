@@ -1,198 +1,177 @@
-import os
-import json
 import time
-import logging
-from datetime import datetime
-from typing import Dict, Any, List, Tuple
-from pathlib import Path
+import threading
+from collections import deque
+from typing import Dict, List, Tuple, Optional
 import numpy as np
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 @dataclass
-class AlignmentMetrics:
-    timestamp: str
-    operation_id: str
-    energy_cost_joules: float
-    latency_ms: float
-    semantic_divergence_pre: float
-    semantic_divergence_post: float
-    language_switch_detected: bool
-    source_language: str
-    target_language: str
-    alignment_quality_score: float
-    memory_footprint_kb: float
+class SemanticFrame:
+    language: str
+    concepts: List[str]
+    confidence: float
+    timestamp: float
+
+@dataclass
+class CoherenceMetrics:
+    transition_latency: float
+    semantic_drift: float
+    conceptual_load: float
+    timestamp: float
 
 class CoherenceRuntimeInstrument:
-    def __init__(self, workdir: str):
-        self.workdir = Path(workdir)
-        self.metrics_dir = self.workdir / "runtime_metrics"
-        self.metrics_dir.mkdir(exist_ok=True)
+    def __init__(self, threshold_initial: float = 0.7, adaptation_rate: float = 0.01):
+        self.threshold = threshold_initial
+        self.adaptation_rate = adaptation_rate
+        self.frame_history = deque(maxlen=100)
+        self.metrics_history = deque(maxlen=1000)
+        self.lock = threading.RLock()
+        self.last_transition_time = None
+        self.active_monitoring = False
+        self.monitor_thread = None
         
-        # Setup logging
-        self.logger = logging.getLogger("coherence_runtime")
-        self.logger.setLevel(logging.INFO)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+    def start_monitoring(self):
+        """Start the runtime monitoring thread"""
+        with self.lock:
+            if not self.active_monitoring:
+                self.active_monitoring = True
+                self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+                self.monitor_thread.start()
+    
+    def stop_monitoring(self):
+        """Stop the runtime monitoring"""
+        with self.lock:
+            self.active_monitoring = False
+            if self.monitor_thread:
+                self.monitor_thread.join()
+    
+    def record_semantic_frame(self, frame: SemanticFrame):
+        """Record a semantic frame for analysis"""
+        with self.lock:
+            self.frame_history.append(frame)
+            if len(self.frame_history) >= 2:
+                self._analyze_coherence()
+    
+    def _analyze_coherence(self):
+        """Analyze coherence between recent semantic frames"""
+        if len(self.frame_history) < 2:
+            return
+            
+        current = self.frame_history[-1]
+        previous = self.frame_history[-2]
         
-        # Runtime state tracking
-        self.energy_accumulator = 0.0
-        self.operation_counter = 0
-        self.latency_history: List[float] = []
-        self.language_switch_history: List[Tuple[str, str, float]] = []
-        self.divergence_history: List[Tuple[float, float]] = []
-        
-    def start_operation(self, operation_id: str) -> None:
-        """Mark the start of an alignment operation"""
-        self.operation_start_time = time.time()
-        self.operation_id = operation_id
-        self.initial_energy = self._get_system_energy()
-        
-    def end_operation(self, 
-                     source_lang: str, 
-                     target_lang: str, 
-                     pre_divergence: float,
-                     post_divergence: float,
-                     quality_score: float,
-                     memory_kb: float) -> None:
-        """Mark the end of an alignment operation and record metrics"""
-        if not hasattr(self, 'operation_start_time'):
+        # Skip if same language
+        if current.language == previous.language:
             return
             
         # Calculate metrics
-        elapsed_time = (time.time() - self.operation_start_time) * 1000  # ms
-        final_energy = self._get_system_energy()
-        energy_cost = final_energy - self.initial_energy
+        latency = self._calculate_transition_latency(current, previous)
+        drift = self._calculate_semantic_drift(current, previous)
+        load = self._calculate_conceptual_load(current, previous)
         
-        # Detect language switch
-        lang_switch = source_lang != target_lang
-        if lang_switch:
-            self.language_switch_history.append((source_lang, target_lang, time.time()))
+        metrics = CoherenceMetrics(latency, drift, load, current.timestamp)
+        self.metrics_history.append(metrics)
         
-        # Record metrics
-        metrics = AlignmentMetrics(
-            timestamp=datetime.utcnow().isoformat(),
-            operation_id=self.operation_id,
-            energy_cost_joules=energy_cost,
-            latency_ms=elapsed_time,
-            semantic_divergence_pre=pre_divergence,
-            semantic_divergence_post=post_divergence,
-            language_switch_detected=lang_switch,
-            source_language=source_lang,
-            target_language=target_lang,
-            alignment_quality_score=quality_score,
-            memory_footprint_kb=memory_kb
+        # Check for misalignment
+        coherence_score = self._calculate_coherence_score(metrics)
+        if coherence_score < self.threshold:
+            self._trigger_coherence_bridge(current, previous, coherence_score)
+            self._adapt_threshold(coherence_score)
+    
+    def _calculate_transition_latency(self, current: SemanticFrame, previous: SemanticFrame) -> float:
+        """Calculate time latency between language transitions"""
+        if self.last_transition_time:
+            return current.timestamp - self.last_transition_time
+        return 0.0
+    
+    def _calculate_semantic_drift(self, current: SemanticFrame, previous: SemanticFrame) -> float:
+        """Calculate semantic drift between frames using Jaccard similarity"""
+        current_set = set(current.concepts)
+        previous_set = set(previous.concepts)
+        
+        if not current_set and not previous_set:
+            return 0.0
+            
+        intersection = len(current_set.intersection(previous_set))
+        union = len(current_set.union(previous_set))
+        
+        if union == 0:
+            return 1.0
+            
+        return 1.0 - (intersection / union)
+    
+    def _calculate_conceptual_load(self, current: SemanticFrame, previous: SemanticFrame) -> float:
+        """Calculate conceptual load as complexity of translation"""
+        # Load is inversely proportional to confidence and directly to concept count
+        current_complexity = len(current.concepts) * (1.0 - current.confidence)
+        previous_complexity = len(previous.concepts) * (1.0 - previous.confidence)
+        
+        return (current_complexity + previous_complexity) / 2.0
+    
+    def _calculate_coherence_score(self, metrics: CoherenceMetrics) -> float:
+        """Calculate overall coherence score from metrics"""
+        # Normalize metrics to 0-1 range
+        normalized_latency = min(1.0, metrics.transition_latency / 2.0)  # Assume 2s threshold
+        normalized_drift = metrics.semantic_drift
+        normalized_load = min(1.0, metrics.conceptual_load / 10.0)  # Assume 10 concept threshold
+        
+        # Weighted combination - higher weight on semantic drift
+        score = (
+            0.3 * (1.0 - normalized_latency) +
+            0.5 * (1.0 - normalized_drift) +
+            0.2 * (1.0 - normalized_load)
         )
         
-        # Store for analysis
-        self.latency_history.append(elapsed_time)
-        self.divergence_history.append((pre_divergence, post_divergence))
-        self.energy_accumulator += energy_cost
-        self.operation_counter += 1
+        return max(0.0, min(1.0, score))
+    
+    def _trigger_coherence_bridge(self, current: SemanticFrame, previous: SemanticFrame, coherence_score: float):
+        """Trigger the coherence bridge when misalignment is detected"""
+        print(f"COHERENCE ALERT: Misalignment detected between {previous.language} and {current.language}")
+        print(f"  Coherence Score: {coherence_score:.3f} (threshold: {self.threshold:.3f})")
+        print(f"  Semantic Drift: {self._calculate_semantic_drift(current, previous):.3f}")
+        print(f"  Conceptual Load: {self._calculate_conceptual_load(current, previous):.3f}")
         
-        # Log metrics
-        self._log_metrics(metrics)
-        
-        # Check for correlations
-        self._check_correlations(metrics)
-        
-    def _get_system_energy(self) -> float:
-        """Simulate energy consumption reading (in Joules)"""
-        # In a real implementation, this would interface with power monitoring hardware
-        # For simulation, we'll use a small random energy cost per operation
-        return np.random.uniform(0.01, 0.1)
-        
-    def _log_metrics(self, metrics: AlignmentMetrics) -> None:
-        """Write metrics to structured log file"""
-        log_file = self.metrics_dir / f"alignment_metrics_{datetime.utcnow().strftime('%Y%m%d')}.jsonl"
-        
-        with open(log_file, 'a') as f:
-            f.write(json.dumps(asdict(metrics)) + '\n')
-            
-        self.logger.info(f"Operation {metrics.operation_id}: "
-                        f"Energy={metrics.energy_cost_joules:.4f}J, "
-                        f"Latency={metrics.latency_ms:.2f}ms, "
-                        f"Divergence Δ={metrics.semantic_divergence_pre - metrics.semantic_divergence_post:.4f}")
-        
-    def _check_correlations(self, metrics: AlignmentMetrics) -> None:
-        """Check for latency spikes correlated with language switches"""
-        if len(self.latency_history) < 10:
-            return
-            
-        # Calculate baseline latency
-        baseline_latency = np.mean(self.latency_history[:-10]) if len(self.latency_history) > 10 else np.mean(self.latency_history)
-        latency_threshold = baseline_latency * 2.0  # 2x baseline as spike threshold
-        
-        # Check for spike
-        if metrics.latency_ms > latency_threshold and metrics.language_switch_detected:
-            self.logger.warning(f"Latency spike detected: {metrics.latency_ms:.2f}ms during language switch "
-                              f"({metrics.source_language} → {metrics.target_language})")
-            
-            # Log correlation event
-            correlation_event = {
-                "timestamp": metrics.timestamp,
-                "event_type": "latency_language_correlation",
-                "latency_ms": metrics.latency_ms,
-                "baseline_latency_ms": baseline_latency,
-                "languages": f"{metrics.source_language}->{metrics.target_language}",
-                "correlation_strength": self._calculate_correlation_strength()
-            }
-            
-            correlation_file = self.metrics_dir / "correlations.jsonl"
-            with open(correlation_file, 'a') as f:
-                f.write(json.dumps(correlation_event) + '\n')
+        # In a real implementation, this would trigger the actual coherence bridge
+        self._activate_bridge_mechanism(current, previous)
+    
+    def _activate_bridge_mechanism(self, current: SemanticFrame, previous: SemanticFrame):
+        """Activate the coherence bridge mechanism"""
+        # Placeholder for actual bridge activation logic
+        self.last_transition_time = time.time()
+        pass
+    
+    def _adapt_threshold(self, coherence_score: float):
+        """Dynamically adjust threshold based on performance"""
+        error = coherence_score - self.threshold
+        self.threshold = max(0.1, min(0.9, self.threshold + self.adaptation_rate * error))
+    
+    def _monitor_loop(self):
+        """Main monitoring loop"""
+        while self.active_monitoring:
+            time.sleep(0.01)  # 10ms monitoring interval
+            # Additional real-time monitoring logic could go here
+    
+    def get_metrics_summary(self) -> Dict[str, float]:
+        """Get summary of recent metrics"""
+        with self.lock:
+            if not self.metrics_history:
+                return {}
                 
-    def _calculate_correlation_strength(self) -> float:
-        """Calculate correlation strength between recent latency and language switches"""
-        if len(self.latency_history) < 5 or len(self.language_switch_history) < 2:
-            return 0.0
+            latencies = [m.transition_latency for m in self.metrics_history]
+            drifts = [m.semantic_drift for m in self.metrics_history]
+            loads = [m.conceptual_load for m in self.metrics_history]
             
-        # Simple correlation metric: ratio of spikes during switches
-        recent_latencies = self.latency_history[-10:]
-        baseline = np.mean(recent_latencies[:-5]) if len(recent_latencies) > 5 else np.mean(recent_latencies)
-        spikes = [lat for lat in recent_latencies if lat > baseline * 2.0]
-        
-        if not spikes:
-            return 0.0
-            
-        return min(len(spikes) / len(recent_latencies), 1.0)
-        
-    def get_summary_stats(self) -> Dict[str, Any]:
-        """Get runtime summary statistics"""
-        if not self.latency_history:
-            return {}
-            
-        return {
-            "total_operations": self.operation_counter,
-            "total_energy_consumed": self.energy_accumulator,
-            "average_energy_per_operation": self.energy_accumulator / max(self.operation_counter, 1),
-            "average_latency_ms": np.mean(self.latency_history),
-            "latency_std_dev": np.std(self.latency_history),
-            "max_latency_ms": max(self.latency_history),
-            "language_switches": len(self.language_switch_history),
-            "divergence_improvement_avg": np.mean([
-                pre - post for pre, post in self.divergence_history
-            ]) if self.divergence_history else 0.0
-        }
-        
-    def write_summary_report(self) -> None:
-        """Write a summary report of runtime metrics"""
-        summary = self.get_summary_stats()
-        if not summary:
-            return
-            
-        report_file = self.metrics_dir / "runtime_summary.json"
-        summary["generated_at"] = datetime.utcnow().isoformat()
-        
-        with open(report_file, 'w') as f:
-            json.dump(summary, f, indent=2)
-            
-        self.logger.info(f"Runtime summary written to {report_file}")
-
-# Integration with real_time_coherence_bridge would follow this pattern:
-# 1. Instantiate CoherenceRuntimeInstrument in the bridge constructor
-# 2. Call start_operation() at the beginning of alignment operations
-# 3. Call end_operation() at the end with collected metrics
-# 4. Call write_summary_report() periodically or at shutdown
+            return {
+                'avg_latency': np.mean(latencies) if latencies else 0.0,
+                'avg_drift': np.mean(drifts) if drifts else 0.0,
+                'avg_load': np.mean(loads) if loads else 0.0,
+                'threshold': self.threshold,
+                'samples': len(self.metrics_history)
+            }
+    
+    def reset_metrics(self):
+        """Reset metrics history"""
+        with self.lock:
+            self.metrics_history.clear()
+            self.frame_history.clear()
+            self.last_transition_time = None
