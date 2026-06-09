@@ -1,195 +1,154 @@
-import logging
-import traceback
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+import json
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import datetime
-import numpy as np
-from threading import Lock
-
-@dataclass
-class DivergenceEvent:
-    timestamp: datetime
-    russian_embedding: np.ndarray
-    english_embedding: np.ndarray
-    divergence_score: float
-    stack_trace: str
-    context: Dict[str, Any]
+from typing import Dict, List, Any, Optional
+import traceback
 
 class UnifiedRuntimeValidator:
-    def __init__(self, divergence_threshold: float = 0.1, debug_stream: Optional[str] = None):
-        self.divergence_threshold = divergence_threshold
-        self.debug_stream = debug_stream
-        self.divergence_events: List[DivergenceEvent] = []
-        self.lock = Lock()
-        self.logger = self._setup_logger()
-        self.coherence_hooks: List[callable] = []
+    def __init__(self, histogram_window_size: int = 1000):
+        self.divergence_events = deque(maxlen=histogram_window_size)
+        self.histogram_data = defaultdict(int)
+        self.validation_reports = []
+        self.lock = threading.Lock()
+        self.running = False
+        self.validation_thread = None
         
-    def _setup_logger(self) -> logging.Logger:
-        logger = logging.getLogger('unified_runtime_validator')
-        logger.setLevel(logging.DEBUG)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        return logger
-    
-    def add_coherence_hook(self, hook: callable) -> None:
-        """Add a hook for real-time coherence scoring"""
+    def start(self):
+        """Start the validation process"""
         with self.lock:
-            self.coherence_hooks.append(hook)
+            if not self.running:
+                self.running = True
+                self.validation_thread = threading.Thread(target=self._validation_loop)
+                self.validation_thread.daemon = True
+                self.validation_thread.start()
     
-    def validate_embeddings(self, russian_emb: np.ndarray, english_emb: np.ndarray, 
-                          context: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        Validate embeddings for divergence and trigger events if necessary
-        Returns True if embeddings are coherent, False otherwise
-        """
-        if context is None:
-            context = {}
-            
-        try:
-            # Calculate divergence score (cosine distance)
-            divergence_score = self._calculate_divergence(russian_emb, english_emb)
-            
-            # Check for divergence event
-            if divergence_score > self.divergence_threshold:
-                self._handle_divergence_event(russian_emb, english_emb, divergence_score, context)
-                return False
-            
-            # Run coherence hooks
-            coherence_result = self._run_coherence_hooks(russian_emb, english_emb, context)
-            return coherence_result
-            
-        except Exception as e:
-            self.logger.error(f"Error during embedding validation: {str(e)}")
-            return False
-    
-    def _calculate_divergence(self, russian_emb: np.ndarray, english_emb: np.ndarray) -> float:
-        """Calculate divergence score between embeddings using cosine distance"""
-        # Normalize embeddings
-        russian_norm = russian_emb / np.linalg.norm(russian_emb)
-        english_norm = english_emb / np.linalg.norm(english_emb)
-        
-        # Cosine similarity
-        cosine_sim = np.dot(russian_norm, english_norm)
-        
-        # Cosine distance (divergence)
-        return 1.0 - cosine_sim
-    
-    def _handle_divergence_event(self, russian_emb: np.ndarray, english_emb: np.ndarray, 
-                               divergence_score: float, context: Dict[str, Any]) -> None:
-        """Handle divergence event by logging and storing it"""
-        # Capture full stack trace
-        stack_trace = traceback.format_stack()
-        full_trace = ''.join(stack_trace)
-        
-        # Create divergence event
-        event = DivergenceEvent(
-            timestamp=datetime.now(),
-            russian_embedding=russian_emb.copy(),
-            english_embedding=english_emb.copy(),
-            divergence_score=divergence_score,
-            stack_trace=full_trace,
-            context=context
-        )
-        
-        # Store event
+    def stop(self):
+        """Stop the validation process"""
         with self.lock:
-            self.divergence_events.append(event)
-        
-        # Log event
-        self.logger.warning(f"Divergence detected: score={divergence_score:.4f}")
-        self.logger.debug(f"Stack trace:\n{full_trace}")
-        
-        # Write to debug stream if configured
-        if self.debug_stream:
-            self._write_to_debug_stream(event)
+            self.running = False
+        if self.validation_thread:
+            self.validation_thread.join()
     
-    def _write_to_debug_stream(self, event: DivergenceEvent) -> None:
-        """Write divergence event to debug stream"""
-        try:
-            debug_info = {
-                'timestamp': event.timestamp.isoformat(),
-                'divergence_score': event.divergence_score,
-                'stack_trace': event.stack_trace,
-                'context': event.context
+    def consume_divergence_event(self, event: Dict[str, Any]):
+        """Consume divergence events from semantic_drift_hooks"""
+        with self.lock:
+            timestamp = datetime.now().isoformat()
+            event_data = {
+                'timestamp': timestamp,
+                'type': event.get('type', 'unknown'),
+                'severity': event.get('severity', 'medium'),
+                'description': event.get('description', ''),
+                'model_context': event.get('model_context', {}),
+                'stack_trace': event.get('stack_trace', ''),
+                'coherence_data': event.get('coherence_data', {})
+            }
+            self.divergence_events.append(event_data)
+            self.histogram_data[event_data['type']] += 1
+    
+    def get_histogram(self) -> Dict[str, int]:
+        """Get real-time histogram of semantic divergence types"""
+        with self.lock:
+            return dict(self.histogram_data)
+    
+    def get_recent_events(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get recent divergence events"""
+        with self.lock:
+            return list(self.divergence_events)[-limit:]
+    
+    def generate_validation_report(self) -> Dict[str, Any]:
+        """Generate comprehensive validation report with stack traces"""
+        with self.lock:
+            total_events = len(self.divergence_events)
+            histogram = dict(self.histogram_data)
+            
+            # Group events by type for detailed analysis
+            events_by_type = defaultdict(list)
+            for event in self.divergence_events:
+                events_by_type[event['type']].append(event)
+            
+            # Extract stack traces
+            stack_traces = []
+            for event in self.divergence_events:
+                if event.get('stack_trace'):
+                    stack_traces.append({
+                        'timestamp': event['timestamp'],
+                        'type': event['type'],
+                        'trace': event['stack_trace']
+                    })
+            
+            report = {
+                'generated_at': datetime.now().isoformat(),
+                'total_divergence_events': total_events,
+                'divergence_histogram': histogram,
+                'events_by_type': dict(events_by_type),
+                'stack_traces': stack_traces,
+                'coherence_metrics': self._extract_coherence_metrics()
             }
             
-            # In a real implementation, this would write to a file or stream
-            with open(self.debug_stream, 'a') as f:
-                f.write(f"{debug_info}\n")
-                
-        except Exception as e:
-            self.logger.error(f"Failed to write to debug stream: {str(e)}")
+            self.validation_reports.append(report)
+            return report
     
-    def _run_coherence_hooks(self, russian_emb: np.ndarray, english_emb: np.ndarray, 
-                           context: Dict[str, Any]) -> bool:
-        """Run all registered coherence hooks"""
-        try:
-            for hook in self.coherence_hooks:
-                result = hook(russian_emb, english_emb, context)
-                if not result:  # If any hook returns False, embeddings are not coherent
-                    return False
-            return True
-        except Exception as e:
-            self.logger.error(f"Error in coherence hook: {str(e)}")
-            return False
-    
-    def get_divergence_events(self) -> List[DivergenceEvent]:
-        """Get all recorded divergence events"""
+    def _extract_coherence_metrics(self) -> Dict[str, Any]:
+        """Extract coherence metrics from events"""
+        metrics = {
+            'total_coherence_violations': 0,
+            'average_coherence_score': 0.0,
+            'coherence_trend': []
+        }
+        
+        coherence_scores = []
+        violations = 0
+        
         with self.lock:
-            return self.divergence_events.copy()
+            for event in self.divergence_events:
+                coherence_data = event.get('coherence_data', {})
+                if coherence_data:
+                    score = coherence_data.get('coherence_score', 0)
+                    coherence_scores.append(score)
+                    if coherence_data.get('is_violation', False):
+                        violations += 1
+        
+        if coherence_scores:
+            metrics['average_coherence_score'] = sum(coherence_scores) / len(coherence_scores)
+        
+        metrics['total_coherence_violations'] = violations
+        return metrics
     
-    def clear_events(self) -> None:
-        """Clear all recorded divergence events"""
-        with self.lock:
-            self.divergence_events.clear()
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get statistics about divergence events"""
-        with self.lock:
-            if not self.divergence_events:
-                return {
-                    'total_events': 0,
-                    'max_divergence': 0.0,
-                    'avg_divergence': 0.0,
-                    'recent_events': []
-                }
-            
-            scores = [event.divergence_score for event in self.divergence_events]
-            recent_events = sorted(self.divergence_events, 
-                                 key=lambda x: x.timestamp, reverse=True)[:10]
-            
-            return {
-                'total_events': len(self.divergence_events),
-                'max_divergence': max(scores),
-                'avg_divergence': sum(scores) / len(scores),
-                'recent_events': [
-                    {
-                        'timestamp': event.timestamp.isoformat(),
-                        'divergence_score': event.divergence_score,
-                        'context': event.context
-                    }
-                    for event in recent_events
-                ]
-            }
+    def _validation_loop(self):
+        """Background validation loop"""
+        while self.running:
+            try:
+                # Periodic validation tasks can be added here
+                time.sleep(1)
+            except Exception as e:
+                print(f"Validation loop error: {e}")
+                traceback.print_exc()
 
-# Example coherence hook function
-def example_coherence_hook(russian_emb: np.ndarray, english_emb: np.ndarray, 
-                          context: Dict[str, Any]) -> bool:
-    """Example hook that checks if embeddings have similar magnitude"""
-    russian_mag = np.linalg.norm(russian_emb)
-    english_mag = np.linalg.norm(english_emb)
-    
-    # If magnitude difference is too large, embeddings may be incoherent
-    magnitude_ratio = min(russian_mag, english_mag) / max(russian_mag, english_mag)
-    return magnitude_ratio > 0.5  # Return True if coherent
+# Global instance
+_validator_instance = None
+_validator_lock = threading.Lock()
 
-# Usage example:
-# validator = UnifiedRuntimeValidator(divergence_threshold=0.15, debug_stream="divergence.log")
-# validator.add_coherence_hook(example_coherence_hook)
-# 
-# # Validate embeddings
-# russian_vector = np.random.rand(300)
-# english_vector = np.random.rand(300)
-# is_coherent = validator.validate_embeddings(russian_vector, english_vector, {"source": "test"})
+def get_validator() -> UnifiedRuntimeValidator:
+    """Get singleton validator instance"""
+    global _validator_instance
+    with _validator_lock:
+        if _validator_instance is None:
+            _validator_instance = UnifiedRuntimeValidator()
+        return _validator_instance
+
+def consume_divergence_event(event: Dict[str, Any]):
+    """Convenience function to consume divergence events"""
+    validator = get_validator()
+    validator.consume_divergence_event(event)
+
+def get_current_histogram() -> Dict[str, int]:
+    """Get current divergence histogram"""
+    validator = get_validator()
+    return validator.get_histogram()
+
+def get_validation_report() -> Dict[str, Any]:
+    """Generate and return validation report"""
+    validator = get_validator()
+    return validator.generate_validation_report()
