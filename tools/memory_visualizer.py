@@ -1,238 +1,228 @@
-import psutil
-import time
+import networkx as nx
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from datetime import datetime
-import threading
+import numpy as np
+import pandas as pd
+from matplotlib.widgets import Slider, Button, RadioButtons
+import matplotlib.patches as mpatches
+from collections import defaultdict
 import json
-import os
-from typing import List, Dict, Tuple
-import logging
+from datetime import datetime, timedelta
+import random
 
 class MemoryVisualizer:
-    def __init__(self, process_name: str = None, pid: int = None, duration: int = 60, interval: int = 1):
-        """
-        Initialize the Memory Visualizer
+    def __init__(self):
+        self.graph = nx.Graph()
+        self.memories = []
+        self.access_logs = []
+        self.current_filter = "all"
+        self.setup_sample_data()
+        self.setup_figure()
         
-        Args:
-            process_name: Name of the process to monitor (optional)
-            pid: Process ID to monitor (optional)
-            duration: Duration to monitor in seconds
-            interval: Interval between measurements in seconds
-        """
-        self.process_name = process_name
-        self.pid = pid
-        self.duration = duration
-        self.interval = interval
-        self.data = []
-        self.timestamps = []
-        self.memory_usage = []
-        self.cpu_usage = []
+    def setup_sample_data(self):
+        # Sample memory data
+        contours = ["episodic", "semantic", "procedural", "emotional"]
+        nodes = []
+        edges = []
         
-        # Setup logging
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger(__name__)
-        
-        # Validate inputs
-        if not process_name and not pid:
-            self.logger.info("Monitoring system-wide memory usage")
-            self.process = None
-        else:
-            self.process = self._get_process()
+        # Create nodes
+        for i in range(50):
+            node = {
+                'id': f'mem_{i}',
+                'content': f'Memory content {i}',
+                'strength': random.uniform(0.1, 1.0),
+                'contour': random.choice(contours),
+                'created_at': datetime.now() - timedelta(days=random.randint(0, 365)),
+                'retention_duration': random.randint(1, 365)
+            }
+            nodes.append(node)
+            self.graph.add_node(node['id'], **node)
             
-    def _get_process(self):
-        """Get process object based on name or PID"""
-        try:
-            if self.pid:
-                return psutil.Process(self.pid)
-            elif self.process_name:
-                for proc in psutil.process_iter(['pid', 'name']):
-                    if proc.info['name'] == self.process_name:
-                        return psutil.Process(proc.info['pid'])
-                raise ValueError(f"Process '{self.process_name}' not found")
-        except Exception as e:
-            self.logger.error(f"Error getting process: {e}")
-            return None
-            
-    def _collect_data(self):
-        """Collect memory usage data"""
-        try:
-            if self.process:
-                # Monitor specific process
-                memory_info = self.process.memory_info()
-                memory_percent = self.process.memory_percent()
-                cpu_percent = self.process.cpu_percent()
-                rss = memory_info.rss / (1024 * 1024)  # MB
-                vms = memory_info.vms / (1024 * 1024)  # MB
-            else:
-                # Monitor system-wide
-                memory = psutil.virtual_memory()
-                memory_percent = memory.percent
-                cpu_percent = psutil.cpu_percent()
-                rss = memory.used / (1024 * 1024)  # MB
-                vms = memory.total / (1024 * 1024)  # MB
+        # Create edges with connection strengths
+        for i in range(100):
+            source = random.choice(nodes)['id']
+            target = random.choice(nodes)['id']
+            if source != target and not self.graph.has_edge(source, target):
+                strength = random.uniform(0.1, 1.0)
+                self.graph.add_edge(source, target, weight=strength)
                 
-            timestamp = datetime.now()
-            
-            self.data.append({
-                'timestamp': timestamp,
-                'rss_mb': rss,
-                'vms_mb': vms,
-                'memory_percent': memory_percent,
-                'cpu_percent': cpu_percent
+        # Generate access logs
+        for _ in range(500):
+            memory_id = random.choice(nodes)['id']
+            access_time = datetime.now() - timedelta(hours=random.randint(0, 24*30))
+            self.access_logs.append({
+                'memory_id': memory_id,
+                'timestamp': access_time,
+                'frequency': random.randint(1, 10)
             })
             
-            self.timestamps.append(timestamp)
-            self.memory_usage.append(rss)
-            self.cpu_usage.append(cpu_percent)
-            
-            self.logger.debug(f"Collected data: {rss:.2f} MB, {memory_percent:.2f}%")
-            
-        except Exception as e:
-            self.logger.error(f"Error collecting data: {e}")
-            
-    def start_monitoring(self):
-        """Start monitoring memory usage"""
-        self.logger.info(f"Starting memory monitoring for {self.duration} seconds")
+        self.memories = nodes
         
-        start_time = time.time()
-        while time.time() - start_time < self.duration:
-            self._collect_data()
-            time.sleep(self.interval)
-            
-        self.logger.info("Monitoring completed")
+    def setup_figure(self):
+        self.fig = plt.figure(figsize=(16, 12))
+        self.fig.suptitle('Memory Graph Visualization', fontsize=16)
         
-    def generate_report(self, output_dir: str = "memory_reports"):
-        """Generate visual report of memory usage"""
-        if not self.data:
-            self.logger.warning("No data to generate report")
-            return
-            
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+        # Main graph subplot
+        self.ax_graph = plt.subplot2grid((3, 4), (0, 0), colspan=2, rowspan=2)
         
-        # Generate plots
-        self._generate_memory_plot(output_dir)
-        self._generate_cpu_plot(output_dir)
-        self._generate_json_report(output_dir)
+        # Heatmap subplot
+        self.ax_heatmap = plt.subplot2grid((3, 4), (0, 2), colspan=2)
         
-        self.logger.info(f"Report generated in {output_dir}")
+        # Timeline subplot
+        self.ax_timeline = plt.subplot2grid((3, 4), (1, 2), colspan=2)
         
-    def _generate_memory_plot(self, output_dir: str):
-        """Generate memory usage plot"""
-        plt.figure(figsize=(12, 6))
+        # Controls
+        self.ax_filter = plt.axes([0.1, 0.02, 0.2, 0.05])
+        self.ax_refresh = plt.axes([0.75, 0.02, 0.1, 0.05])
         
-        # Plot RSS memory usage
-        plt.subplot(1, 2, 1)
-        plt.plot(self.timestamps, self.memory_usage, 'b-', linewidth=1)
-        plt.xlabel('Time')
-        plt.ylabel('Memory Usage (MB)')
-        plt.title('Memory Usage Over Time')
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+        # Filter radio buttons
+        self.radio_filter = RadioButtons(self.ax_filter, ('all', 'episodic', 'semantic', 'procedural', 'emotional'))
+        self.radio_filter.on_clicked(self.update_filter)
         
-        # Plot memory percentage
-        plt.subplot(1, 2, 2)
-        memory_percentages = [d['memory_percent'] for d in self.data]
-        plt.plot(self.timestamps, memory_percentages, 'r-', linewidth=1)
-        plt.xlabel('Time')
-        plt.ylabel('Memory Usage (%)')
-        plt.title('Memory Percentage Over Time')
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+        # Refresh button
+        self.btn_refresh = Button(self.ax_refresh, 'Refresh')
+        self.btn_refresh.on_clicked(self.refresh_visualization)
         
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'memory_usage.png'), dpi=300, bbox_inches='tight')
-        plt.close()
+        self.draw_visualizations()
         
-    def _generate_cpu_plot(self, output_dir: str):
-        """Generate CPU usage plot"""
-        plt.figure(figsize=(10, 6))
-        plt.plot(self.timestamps, self.cpu_usage, 'g-', linewidth=1)
-        plt.xlabel('Time')
-        plt.ylabel('CPU Usage (%)')
-        plt.title('CPU Usage Over Time')
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'cpu_usage.png'), dpi=300, bbox_inches='tight')
-        plt.close()
+    def update_filter(self, label):
+        self.current_filter = label
+        self.draw_visualizations()
         
-    def _generate_json_report(self, output_dir: str):
-        """Generate JSON report with raw data"""
-        report_data = {
-            'process_name': self.process_name,
-            'pid': self.pid,
-            'duration': self.duration,
-            'interval': self.interval,
-            'measurements': self.data,
-            'summary': self._generate_summary()
+    def refresh_visualization(self, event):
+        self.draw_visualizations()
+        
+    def filter_memories(self):
+        if self.current_filter == "all":
+            return self.memories
+        return [m for m in self.memories if m['contour'] == self.current_filter]
+        
+    def draw_graph(self):
+        self.ax_graph.clear()
+        
+        # Filter nodes
+        filtered_memories = self.filter_memories()
+        filtered_ids = [m['id'] for m in filtered_memories]
+        
+        # Create subgraph with filtered nodes
+        subgraph = self.graph.subgraph(filtered_ids)
+        
+        # Node positions
+        pos = nx.spring_layout(subgraph, k=2, iterations=50)
+        
+        # Draw nodes with color based on contour
+        contour_colors = {
+            'episodic': '#FF6B6B',
+            'semantic': '#4ECDC4',
+            'procedural': '#45B7D1',
+            'emotional': '#96CEB4'
         }
         
-        with open(os.path.join(output_dir, 'memory_report.json'), 'w') as f:
-            json.dump(report_data, f, indent=2, default=str)
+        node_colors = []
+        node_sizes = []
+        for node in subgraph.nodes():
+            memory = self.graph.nodes[node]
+            node_colors.append(contour_colors.get(memory['contour'], '#CCCCCC'))
+            node_sizes.append(memory['strength'] * 300)
             
-    def _generate_summary(self) -> Dict:
-        """Generate summary statistics"""
-        if not self.memory_usage:
-            return {}
-            
-        return {
-            'total_measurements': len(self.memory_usage),
-            'memory_usage_mb': {
-                'min': round(min(self.memory_usage), 2),
-                'max': round(max(self.memory_usage), 2),
-                'average': round(sum(self.memory_usage) / len(self.memory_usage), 2),
-                'peak_time': self.timestamps[self.memory_usage.index(max(self.memory_usage))].isoformat()
-            },
-            'memory_percentage': {
-                'min': round(min([d['memory_percent'] for d in self.data]), 2),
-                'max': round(max([d['memory_percent'] for d in self.data]), 2),
-                'average': round(sum([d['memory_percent'] for d in self.data]) / len(self.data), 2)
-            },
-            'cpu_usage': {
-                'min': round(min(self.cpu_usage), 2),
-                'max': round(max(self.cpu_usage), 2),
-                'average': round(sum(self.cpu_usage) / len(self.cpu_usage), 2)
-            }
-        }
+        nx.draw_networkx_nodes(subgraph, pos, 
+                              node_color=node_colors,
+                              node_size=node_sizes,
+                              alpha=0.7,
+                              ax=self.ax_graph)
         
-    def identify_optimizations(self) -> List[str]:
-        """Identify potential memory optimization suggestions"""
-        suggestions = []
+        # Draw edges with width based on strength
+        edge_widths = [subgraph[u][v]['weight'] * 3 for u, v in subgraph.edges()]
+        nx.draw_networkx_edges(subgraph, pos,
+                              width=edge_widths,
+                              alpha=0.5,
+                              ax=self.ax_graph)
         
-        if not self.data:
-            return suggestions
-            
-        # Check for memory leaks (continuously increasing memory)
-        memory_trend = self._calculate_trend(self.memory_usage)
-        if memory_trend > 0.1:  # Positive trend indicates increasing memory
-            suggestions.append("Potential memory leak detected - memory usage is consistently increasing")
-            
-        # Check for high memory usage
-        avg_memory = sum(self.memory_usage) / len(self.memory_usage)
-        max_memory = max(self.memory_usage)
-        if max_memory > avg_memory * 2:
-            suggestions.append("Significant memory spikes detected - consider optimizing memory allocation")
-            
-        # Check for high CPU usage correlation
-        if len(self.cpu_usage) > 1:
-            # Calculate correlation between CPU and memory usage
-            correlation = self._calculate_correlation(self.cpu_usage, self.memory_usage)
-            if abs(correlation) > 0.7:
-                suggestions.append("High correlation between CPU and memory usage - investigate potential bottlenecks")
+        # Add legend
+        legend_elements = [mpatches.Patch(color=color, label=contour) 
+                          for contour, color in contour_colors.items()]
+        self.ax_graph.legend(handles=legend_elements, loc='upper right')
+        
+        self.ax_graph.set_title('Memory Connection Graph')
+        self.ax_graph.axis('off')
+        
+    def draw_heatmap(self):
+        self.ax_heatmap.clear()
+        
+        # Filter memories
+        filtered_memories = self.filter_memories()
+        filtered_ids = [m['id'] for m in filtered_memories]
+        
+        # Create access frequency matrix
+        access_data = defaultdict(lambda: defaultdict(int))
+        for log in self.access_logs:
+            if log['memory_id'] in filtered_ids:
+                hour = log['timestamp'].hour
+                day = log['timestamp'].weekday()
+                access_data[day][hour] += log['frequency']
                 
-        # Check for inefficient memory patterns
-        memory_variance = sum((x - avg_memory) ** 2 for x in self.memory_usage) / len(self.memory_usage)
-        if memory_variance > (avg_memory * 0.5) ** 2:  # High variance indicates inefficient usage
-            suggestions.append("High memory usage variance - consider implementing memory pooling or caching strategies")
-            
-        return suggestions
+        # Convert to matrix
+        matrix = np.zeros((7, 24))
+        for day in range(7):
+            for hour in range(24):
+                matrix[day][hour] = access_data[day][hour]
+                
+        # Create heatmap
+        im = self.ax_heatmap.imshow(matrix, cmap='YlOrRd', aspect='auto')
         
-    def _calculate_trend(self, values: List[float]) -> float:
-        """Calculate linear trend of values"""
-        if len(values) < 2:
-            return 0
+        # Set labels
+        self.ax_heatmap.set_xticks(range(0, 24, 4))
+        self.ax_heatmap.set_xticklabels([f'{i}:00' for i in range(0, 24, 4)])
+        self.ax_heatmap.set_yticks(range(7))
+        self.ax_heatmap.set_yticklabels(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])
+        
+        self.ax_heatmap.set_title('Access Frequency Heatmap')
+        self.ax_heatmap.set_xlabel('Hour of Day')
+        self.ax_heatmap.set_ylabel('Day of Week')
+        
+        # Add colorbar
+        plt.colorbar(im, ax=self.ax_heatmap)
+        
+    def draw_timeline(self):
+        self.ax_timeline.clear()
+        
+        # Filter memories
+        filtered_memories = self.filter_memories()
+        
+        # Group by creation date
+        creation_dates = [m['created_at'].date() for m in filtered_memories]
+        date_counts = defaultdict(int)
+        for date in creation_dates:
+            date_counts[date] += 1
+            
+        # Sort dates
+        sorted_dates = sorted(date_counts.keys())
+        counts = [date_counts[date] for date in sorted_dates]
+        
+        # Plot timeline
+        self.ax_timeline.plot(sorted_dates, counts, marker='o', linewidth=2, markersize=4)
+        self.ax_timeline.fill_between(sorted_dates, counts, alpha=0.3)
+        
+        self.ax_timeline.set_title('Memory Formation Timeline')
+        self.ax_timeline.set_xlabel('Date')
+        self.ax_timeline.set_ylabel('Number of Memories Created')
+        self.ax_timeline.tick_params(axis='x', rotation=45)
+        
+        # Add grid
+        self.ax_timeline.grid(True, alpha=0.3)
+        
+    def draw_visualizations(self):
+        self.draw_graph()
+        self.draw_heatmap()
+        self.draw_timeline()
+        plt.tight_layout()
+        self.fig.canvas.draw()
+        
+    def show(self):
+        plt.show()
+
+def main():
+    visualizer = MemoryVisualizer()
+    visualizer.show()
+
+if __name__ == "__main__":
+    main()
