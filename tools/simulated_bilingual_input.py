@@ -1,113 +1,195 @@
 import argparse
 import random
+import time
 import json
-from typing import Dict, List, Tuple
+from typing import List, Tuple, Dict, Any
+from collections import defaultdict
 
-def generate_semantic_divergence(base_text: str, delta: float, language: str) -> str:
-    """
-    Generate semantic divergence based on delta parameter.
-    delta = 0.0 means no divergence (identical meaning)
-    delta = 1.0 means maximum divergence (opposite or unrelated meaning)
-    """
-    # Common semantic variations
-    semantic_variations = {
-        "english": {
-            "positive": ["excellent", "outstanding", "superb", "amazing", "wonderful"],
-            "negative": ["terrible", "awful", "horrible", "dreadful", "abysmal"],
-            "neutral": ["adequate", "acceptable", "moderate", "standard", "average"]
-        },
-        "russian": {
-            "positive": ["отличный", "выдающийся", "великолепный", "удивительный", "замечательный"],
-            "negative": ["ужасный", "отвратительный", "страшный", "кошмарный", "отстойный"],
-            "neutral": ["удовлетворительный", "приемлемый", "умеренный", "стандартный", "средний"]
+class SimulatedBilingualInput:
+    def __init__(self, stress_test: bool = False):
+        self.stress_test = stress_test
+        self.exchange_count = 0
+        self.mismatch_interval = 0
+        self.next_mismatch = 0
+        self.validator_states = {}
+        self.trigger_phrases = []
+        self.repair_start_time = None
+        self.log_data = []
+        self._initialize_mismatch_triggers()
+        self._reset_interval()
+
+    def _initialize_mismatch_triggers(self):
+        """Initialize semantic mismatch trigger phrases"""
+        self.mismatch_pairs = [
+            ("good morning", "доброе утро"),
+            ("how are you", "как дела"),
+            ("thank you", "спасибо"),
+            ("please", "пожалуйста"),
+            ("sorry", "извините"),
+            ("yes", "да"),
+            ("no", "нет"),
+            ("hello", "привет"),
+            ("goodbye", "до свидания"),
+            ("excuse me", "простите"),
+            ("I understand", "я понимаю"),
+            ("I don't know", "я не знаю"),
+            ("what time is it", "который час"),
+            ("where is the bathroom", "где туалет"),
+            ("how much does it cost", "сколько это стоит")
+        ]
+        
+        # Escalated versions for stress testing
+        self.stress_mismatch_pairs = [
+            ("good morning everyone", "добрый вечер всем"),
+            ("how are you today", "как погода"),
+            ("thank you very much", "большое спасибо"),
+            ("please hurry", "пожалуйста медленно"),
+            ("sorry about that", "извините за это"),
+            ("yes absolutely", "нет конечно"),
+            ("no problem at all", "большая проблема"),
+            ("hello friend", "привет незнакомец"),
+            ("goodbye forever", "до скорого"),
+            ("excuse me sir", "простите девушка"),
+            ("I completely understand", "я совсем не понимаю"),
+            ("I definitely know", "я точно не знаю"),
+            ("what time is it exactly", "который день сегодня"),
+            ("where is the nearest bathroom", "где находится кухня"),
+            ("how much does this expensive item cost", "сколько стоит это дешево")
+        ]
+
+    def _reset_interval(self):
+        """Reset the interval between mismatches"""
+        self.mismatch_interval = random.randint(3, 5)
+        self.next_mismatch = self.exchange_count + self.mismatch_interval
+
+    def _inject_semantic_mismatch(self, english: str, russian: str) -> Tuple[str, str]:
+        """Inject a controlled semantic mismatch"""
+        if self.stress_test and random.random() < 0.3:
+            # Use escalated mismatches for stress testing
+            mismatch_pair = random.choice(self.stress_mismatch_pairs)
+        else:
+            mismatch_pair = random.choice(self.mismatch_pairs)
+            
+        self.trigger_phrases.append(mismatch_pair)
+        return mismatch_pair[0], mismatch_pair[1]
+
+    def process_exchange(self, english_input: str, russian_input: str) -> Tuple[str, str]:
+        """Process a bilingual exchange, potentially injecting mismatches"""
+        self.exchange_count += 1
+        
+        # Check if we should inject a mismatch
+        if self.exchange_count >= self.next_mismatch:
+            original_english = english_input
+            original_russian = russian_input
+            english_input, russian_input = self._inject_semantic_mismatch(english_input, russian_input)
+            
+            # Log the mismatch event
+            self._log_mismatch(original_english, original_russian, english_input, russian_input)
+            
+            # Reset interval for next mismatch
+            self._reset_interval()
+            
+        return english_input, russian_input
+
+    def _log_mismatch(self, original_eng: str, original_rus: str, modified_eng: str, modified_rus: str):
+        """Log mismatch details"""
+        log_entry = {
+            "timestamp": time.time(),
+            "exchange_count": self.exchange_count,
+            "original_english": original_eng,
+            "original_russian": original_rus,
+            "modified_english": modified_eng,
+            "modified_russian": modified_rus,
+            "validator_states_pre": dict(self.validator_states),
+            "trigger_phrase_pair": (modified_eng, modified_rus)
         }
-    }
-    
-    # Replace sentiment words based on delta
-    if delta > 0.7:
-        # High divergence - opposite sentiment
-        if language == "english":
-            for word in semantic_variations["english"]["positive"]:
-                if word in base_text:
-                    base_text = base_text.replace(word, random.choice(semantic_variations["english"]["negative"]))
-            for word in semantic_variations["english"]["negative"]:
-                if word in base_text:
-                    base_text = base_text.replace(word, random.choice(semantic_variations["english"]["positive"]))
-        else:
-            for word in semantic_variations["russian"]["positive"]:
-                if word in base_text:
-                    base_text = base_text.replace(word, random.choice(semantic_variations["russian"]["negative"]))
-            for word in semantic_variations["russian"]["negative"]:
-                if word in base_text:
-                    base_text = base_text.replace(word, random.choice(semantic_variations["russian"]["positive"]))
-    elif delta > 0.3:
-        # Medium divergence - neutral sentiment
-        if language == "english":
-            for word in semantic_variations["english"]["positive"] + semantic_variations["english"]["negative"]:
-                if word in base_text:
-                    base_text = base_text.replace(word, random.choice(semantic_variations["english"]["neutral"]))
-        else:
-            for word in semantic_variations["russian"]["positive"] + semantic_variations["russian"]["negative"]:
-                if word in base_text:
-                    base_text = base_text.replace(word, random.choice(semantic_variations["russian"]["neutral"]))
-    
-    return base_text
+        self.log_data.append(log_entry)
+        self.repair_start_time = time.time()
 
-def create_bilingual_input(base_english: str, base_russian: str, delta: float) -> Dict:
-    """Create a bilingual input pair with controlled semantic divergence."""
-    
-    # Apply semantic divergence based on delta
-    english_text = generate_semantic_divergence(base_english, delta, "english")
-    russian_text = generate_semantic_divergence(base_russian, delta, "russian")
-    
-    return {
-        "english": english_text,
-        "russian": russian_text,
-        "delta": delta
-    }
+    def update_validator_state(self, validator_name: str, state: Any):
+        """Update validator state for logging"""
+        self.validator_states[validator_name] = state
+
+    def log_coherence_repair(self, repair_latency: float = None):
+        """Log coherence repair completion"""
+        if self.log_data and "repair_latency" not in self.log_data[-1]:
+            if repair_latency is None and self.repair_start_time:
+                repair_latency = time.time() - self.repair_start_time
+            
+            if repair_latency is not None:
+                self.log_data[-1]["repair_latency"] = repair_latency
+                self.log_data[-1]["validator_states_post"] = dict(self.validator_states)
+                self.repair_start_time = None
+
+    def get_log_summary(self) -> Dict[str, Any]:
+        """Get summary of logged events"""
+        total_mismatches = len([entry for entry in self.log_data if "trigger_phrase_pair" in entry])
+        avg_repair_latency = 0
+        if total_mismatches > 0:
+            total_latency = sum(entry.get("repair_latency", 0) for entry in self.log_data if "repair_latency" in entry)
+            avg_repair_latency = total_latency / total_mismatches if total_mismatches > 0 else 0
+            
+        return {
+            "total_exchanges": self.exchange_count,
+            "total_mismatches": total_mismatches,
+            "average_repair_latency": avg_repair_latency,
+            "mismatch_rate": total_mismatches / self.exchange_count if self.exchange_count > 0 else 0
+        }
+
+    def save_logs(self, filename: str):
+        """Save logs to file"""
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(self.log_data, f, indent=2, ensure_ascii=False)
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate simulated bilingual input with controlled semantic divergence")
-    parser.add_argument("--delta", type=float, default=0.0, help="Semantic divergence intensity (0.0-1.0)")
-    parser.add_argument("--count", type=int, default=1, help="Number of input pairs to generate")
-    parser.add_argument("--output", type=str, default="bilingual_input.json", help="Output file path")
+    parser = argparse.ArgumentParser(description="Simulated Bilingual Input with Controlled Semantic Mismatches")
+    parser.add_argument("--stress-test", action="store_true", help="Enable stress testing with escalated mismatches")
+    parser.add_argument("--log-file", type=str, default="bilingual_simulation_log.json", help="Log file path")
+    parser.add_argument("--exchanges", type=int, default=20, help="Number of exchanges to simulate")
     
     args = parser.parse_args()
     
-    # Base text samples
-    base_samples = [
-        {
-            "english": "This product is excellent and I highly recommend it to everyone",
-            "russian": "Этот продукт отличный и я настоятельно рекомендую его всем"
-        },
-        {
-            "english": "The service was terrible and I will never use this company again",
-            "russian": "Сервис был ужасным и я никогда больше не буду пользоваться этой компанией"
-        },
-        {
-            "english": "The movie was average, nothing special but not bad either",
-            "russian": "Фильм был средним, ничего особенного, но и не плохим"
-        }
+    simulator = SimulatedBilingualInput(stress_test=args.stress_test)
+    
+    # Sample conversation data
+    sample_exchanges = [
+        ("Hello there", "Привет там"),
+        ("How are you doing today?", "Как ты сегодня поживаешь?"),
+        ("Thank you for your help", "Спасибо за вашу помощь"),
+        ("Please pass the salt", "Пожалуйста передайте соль"),
+        ("Sorry for being late", "Извините за опоздание"),
+        ("Yes, I agree with you", "Да, я согласен с вами"),
+        ("No, that's not right", "Нет, это неправильно"),
+        ("Good morning everyone", "Доброе утро всем"),
+        ("Excuse me, where is the exit?", "Простите, где выход?"),
+        ("I understand the situation", "Я понимаю ситуацию"),
+        ("I don't know the answer", "Я не знаю ответ"),
+        ("What time is it now?", "Который час сейчас?"),
+        ("Where is the bathroom located?", "Где находится туалет?"),
+        ("How much does this cost?", "Сколько это стоит?"),
+        ("Have a nice day", "Хорошего дня"),
+        ("See you later", "Увидимся позже"),
+        ("Good night", "Спокойной ночи"),
+        ("Congratulations on your success", "Поздравляем с вашим успехом"),
+        ("Happy birthday", "С днем рождения"),
+        ("Merry Christmas", "С Рождеством")
     ]
     
-    # Generate bilingual inputs
-    results = []
-    for i in range(args.count):
-        # Randomly select a base sample
-        base = random.choice(base_samples)
+    # Simulate exchanges
+    for i in range(min(args.exchanges, len(sample_exchanges))):
+        english, russian = sample_exchanges[i]
         
-        # Create input with specified delta
-        bilingual_input = create_bilingual_input(base["english"], base["russian"], args.delta)
-        results.append(bilingual_input)
-    
-    # Output results
-    if args.count == 1:
-        print(json.dumps(results[0], indent=2, ensure_ascii=False))
-    else:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-        print(f"Generated {args.count} bilingual input pairs with delta={args.delta}")
-        print(f"Results saved to {args.output}")
-
-if __name__ == "__main__":
-    main()
+        # Simulate validator states
+        simulator.update_validator_state("semantic_coherence", random.choice(["high", "medium", "low"]))
+        simulator.update_validator_state("language_detection", "confident")
+        simulator.update_validator_state("translation_quality", random.uniform(0.7, 1.0))
+        
+        # Process exchange with potential mismatch injection
+        processed_english, processed_russian = simulator.process_exchange(english, russian)
+        
+        # Simulate processing delay
+        time.sleep(0.1)
+        
+        # Simulate repair completion with random latency
+        if simulator.repair_start_time:
+            repair_latency = random.uniform(0
