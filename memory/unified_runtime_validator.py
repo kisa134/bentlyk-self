@@ -1,175 +1,151 @@
+import time
 import logging
 import traceback
+import os
+import signal
 import json
-import time
-from collections import defaultdict, Counter
+from typing import Dict, Any, Optional
 from datetime import datetime
-from typing import Dict, List, Tuple, Any, Optional
-from dataclasses import dataclass, asdict
-from enum import Enum
-
-class LanguageMode(Enum):
-    RUSSIAN = "russian"
-    ENGLISH = "english"
-
-@dataclass
-class DivergenceRecord:
-    timestamp: str
-    language_mode: LanguageMode
-    stack_trace: List[str]
-    fracture_point: str
-    context_data: Dict[str, Any]
-    coherence_impact: float  # 0.0 to 1.0 scale
 
 class UnifiedRuntimeValidator:
-    def __init__(self, log_file: str = "divergence_log.json"):
-        self.log_file = log_file
-        self.divergence_records: List[DivergenceRecord] = []
-        self.fracture_counter = Counter()
-        self._setup_logging()
+    def __init__(self, distrust_threshold: float = 0.81):
+        self.distrust_threshold = distrust_threshold
+        self.logger = self._setup_logger()
+        self.distrust_metrics: Dict[str, float] = {}
+        self.last_distrust_check = 0
+        self.distrust_spike_detected = False
         
-    def _setup_logging(self):
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('runtime_validation.log'),
-                logging.StreamHandler()
-            ]
+    def _setup_logger(self) -> logging.Logger:
+        logger = logging.getLogger('unified_runtime_validator')
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
-        self.logger = logging.getLogger(__name__)
-
-    def capture_divergence(self, language_mode: LanguageMode, 
-                          context_data: Dict[str, Any] = None,
-                          coherence_impact: float = 0.5) -> None:
-        """Capture full stack trace during semantic divergence"""
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        return logger
+    
+    def update_distrust_metric(self, metric_name: str, value: float) -> None:
+        """Update a distrust metric value"""
+        self.distrust_metrics[metric_name] = value
+    
+    def check_distrust_spikes(self) -> Dict[str, float]:
+        """Check for distrust spikes and return metrics that exceed threshold"""
+        spikes = {}
+        for metric_name, value in self.distrust_metrics.items():
+            if value >= self.distrust_threshold:
+                spikes[metric_name] = value
+        return spikes
+    
+    def log_distrust_spike(self, spikes: Dict[str, float]) -> None:
+        """Log distrust spikes with timestamp and stack trace"""
+        if not spikes:
+            return
+            
+        timestamp = datetime.utcnow().isoformat()
         stack_trace = traceback.format_stack()
-        timestamp = datetime.now().isoformat()
         
-        # Extract fracture point (last significant frame)
-        fracture_point = self._extract_fracture_point(stack_trace)
+        log_data = {
+            'timestamp': timestamp,
+            'event_type': 'distrust_spike',
+            'spikes': spikes,
+            'stack_trace': stack_trace
+        }
         
-        record = DivergenceRecord(
-            timestamp=timestamp,
-            language_mode=language_mode,
-            stack_trace=stack_trace,
-            fracture_point=fracture_point,
-            context_data=context_data or {},
-            coherence_impact=coherence_impact
-        )
-        
-        self.divergence_records.append(record)
-        self.fracture_counter[fracture_point] += 1
-        
-        self._log_divergence(record)
-        self._save_to_file()
-
-    def _extract_fracture_point(self, stack_trace: List[str]) -> str:
-        """Extract meaningful fracture point from stack trace"""
-        for frame in reversed(stack_trace[:-1]):  # Exclude current frame
-            if 'unified_runtime_validator.py' not in frame:
-                # Extract function/file info
-                lines = frame.split('\n')
-                if lines:
-                    return lines[0].strip()
-        return "unknown_fracture_point"
-
-    def _log_divergence(self, record: DivergenceRecord) -> None:
-        """Log divergence with timestamp and language context"""
-        self.logger.info(f"SEMANTIC DIVERGENCE DETECTED")
-        self.logger.info(f"Language Mode: {record.language_mode.value}")
-        self.logger.info(f"Timestamp: {record.timestamp}")
-        self.logger.info(f"Fracture Point: {record.fracture_point}")
-        self.logger.info(f"Coherence Impact: {record.coherence_impact}")
-        self.logger.info("Stack Trace:")
-        for line in record.stack_trace:
-            self.logger.info(f"  {line.rstrip()}")
-
-    def _save_to_file(self) -> None:
-        """Save divergence records to JSON file"""
+        self.logger.warning(f"Distrust spike detected: {json.dumps(log_data)}")
+    
+    def detect_semantic_divergence(self, expected: Any, actual: Any) -> bool:
+        """Detect semantic divergence between expected and actual values"""
         try:
-            records_data = []
-            for record in self.divergence_records:
-                record_dict = asdict(record)
-                record_dict['language_mode'] = record.language_mode.value
-                records_data.append(record_dict)
-            
-            with open(self.log_file, 'w') as f:
-                json.dump(records_data, f, indent=2)
+            return not self._deep_equal(expected, actual)
         except Exception as e:
-            self.logger.error(f"Failed to save divergence log: {e}")
-
-    def load_from_file(self) -> None:
-        """Load divergence records from JSON file"""
-        try:
-            with open(self.log_file, 'r') as f:
-                data = json.load(f)
-            
-            self.divergence_records = []
-            for record_data in data:
-                record = DivergenceRecord(
-                    timestamp=record_data['timestamp'],
-                    language_mode=LanguageMode(record_data['language_mode']),
-                    stack_trace=record_data['stack_trace'],
-                    fracture_point=record_data['fracture_point'],
-                    context_data=record_data['context_data'],
-                    coherence_impact=record_data['coherence_impact']
-                )
-                self.divergence_records.append(record)
-                self.fracture_counter[record.fracture_point] += 1
-                
-        except FileNotFoundError:
-            self.logger.warning(f"Log file {self.log_file} not found")
-        except Exception as e:
-            self.logger.error(f"Failed to load divergence log: {e}")
-
-    def replay_divergence(self, record_index: int) -> Optional[DivergenceRecord]:
-        """Replay specific divergence scenario from logs"""
-        if 0 <= record_index < len(self.divergence_records):
-            record = self.divergence_records[record_index]
-            self.logger.info("=== REPLAYING DIVERGENCE SCENARIO ===")
-            self._log_divergence(record)
-            return record
+            self.logger.error(f"Error during divergence detection: {e}")
+            return True
+    
+    def _deep_equal(self, a: Any, b: Any) -> bool:
+        """Deep comparison of two values"""
+        if type(a) != type(b):
+            return False
+        if isinstance(a, dict):
+            if set(a.keys()) != set(b.keys()):
+                return False
+            return all(self._deep_equal(a[key], b[key]) for key in a.keys())
+        elif isinstance(a, (list, tuple)):
+            if len(a) != len(b):
+                return False
+            return all(self._deep_equal(a[i], b[i]) for i in range(len(a)))
         else:
-            self.logger.error(f"Invalid record index: {record_index}")
-            return None
-
-    def get_fracture_priority(self) -> List[Tuple[str, int, float]]:
-        """Get prioritized list of fractures by recurrence and impact"""
-        fracture_priority = []
+            return a == b
+    
+    def log_semantic_mismatch(self, expected: Any, actual: Any) -> None:
+        """Log semantic mismatch with timestamp and stack trace"""
+        timestamp = datetime.utcnow().isoformat()
+        stack_trace = traceback.format_stack()
         
-        for fracture_point, count in self.fracture_counter.items():
-            # Calculate average coherence impact for this fracture
-            total_impact = sum(
-                record.coherence_impact 
-                for record in self.divergence_records 
-                if record.fracture_point == fracture_point
-            )
-            avg_impact = total_impact / count if count > 0 else 0
+        log_data = {
+            'timestamp': timestamp,
+            'event_type': 'semantic_mismatch',
+            'expected': str(expected),
+            'actual': str(actual),
+            'stack_trace': stack_trace
+        }
+        
+        self.logger.error(f"Semantic mismatch detected: {json.dumps(log_data)}")
+    
+    def create_diagnostic_artifact(self, distrust_spikes: Dict[str, float], 
+                                 expected: Any, actual: Any) -> str:
+        """Create a diagnostic artifact for combined events"""
+        timestamp = datetime.utcnow().isoformat()
+        stack_trace = traceback.format_stack()
+        
+        artifact_data = {
+            'timestamp': timestamp,
+            'event_type': 'combined_distrust_divergence',
+            'distrust_spikes': distrust_spikes,
+            'semantic_divergence': {
+                'expected': str(expected),
+                'actual': str(actual)
+            },
+            'stack_trace': stack_trace
+        }
+        
+        filename = f"diagnostic_artifact_{timestamp.replace(':', '-')}.json"
+        with open(filename, 'w') as f:
+            json.dump(artifact_data, f, indent=2)
+        
+        return filename
+    
+    def hard_fail_process_kill(self, artifact_filename: str) -> None:
+        """Kill the current process and log the diagnostic artifact"""
+        self.logger.critical(f"Hard fail triggered. Diagnostic artifact saved to: {artifact_filename}")
+        self.logger.critical("Terminating process due to combined distrust spike and semantic divergence")
+        os.kill(os.getpid(), signal.SIGTERM)
+    
+    def validate_runtime_state(self, expected: Any, actual: Any) -> bool:
+        """Main validation method that monitors distrust metrics and detects divergence"""
+        # Check for distrust spikes
+        distrust_spikes = self.check_distrust_spikes()
+        self.distrust_spike_detected = bool(distrust_spikes)
+        
+        if self.distrust_spike_detected:
+            self.log_distrust_spike(distrust_spikes)
+        
+        # Check for semantic divergence
+        semantic_divergence = self.detect_semantic_divergence(expected, actual)
+        
+        if semantic_divergence:
+            self.log_semantic_mismatch(expected, actual)
             
-            # Priority score: frequency * impact
-            priority_score = count * avg_impact
-            fracture_priority.append((fracture_point, count, avg_impact, priority_score))
+            # If both distrust spike and semantic divergence detected, trigger hard fail
+            if self.distrust_spike_detected:
+                artifact_filename = self.create_diagnostic_artifact(
+                    distrust_spikes, expected, actual
+                )
+                self.hard_fail_process_kill(artifact_filename)
+                return False  # This line won't be reached due to process kill
         
-        # Sort by priority score (descending)
-        fracture_priority.sort(key=lambda x: x[3], reverse=True)
-        return fracture_priority
+        return not semantic_divergence
 
-    def generate_priority_report(self) -> str:
-        """Generate report of prioritized fractures"""
-        priority_list = self.get_fracture_priority()
-        report = "=== FRACTURE PRIORITY REPORT ===\n"
-        report += "Rank | Fracture Point | Frequency | Avg Impact | Priority\n"
-        report += "-" * 60 + "\n"
-        
-        for i, (fracture, freq, impact, priority) in enumerate(priority_list[:20], 1):
-            report += f"{i:4d} | {fracture[:30]:30s} | {freq:9d} | {impact:10.2f} | {priority:8.2f}\n"
-        
-        return report
-
-    def clear_records(self) -> None:
-        """Clear all divergence records"""
-        self.divergence_records.clear()
-        self.fracture_counter.clear()
-        self._save_to_file()
-        self.logger.info("All divergence records cleared")
+# Global instance for easy access
+validator = UnifiedRuntimeValidator()
