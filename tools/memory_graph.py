@@ -1,221 +1,234 @@
-class MemoryGraph:
+import hashlib
+import time
+from collections import defaultdict, Counter
+from typing import List, Dict, Tuple, Any, Optional
+from dataclasses import dataclass
+import heapq
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+@dataclass
+class MemoryRecord:
+    id: str
+    content: str
+    vector: Optional[np.ndarray] = None
+    access_count: int = 0
+    last_accessed: float = 0.0
+
+class MetricsCollector:
     def __init__(self):
-        self.nodes = {}
-        self.edges = {}
+        self.metrics = {
+            'exact_matches': 0,
+            'fuzzy_matches': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'query_times': [],
+            'cache_size': 0
+        }
     
-    def add_node(self, node_id, data=None):
-        """Add a node to the graph"""
-        self.nodes[node_id] = data or {}
-        if node_id not in self.edges:
-            self.edges[node_id] = set()
+    def record_exact_match(self):
+        self.metrics['exact_matches'] += 1
     
-    def add_edge(self, from_node, to_node):
-        """Add a bidirectional edge between two nodes"""
-        if from_node not in self.nodes:
-            self.add_node(from_node)
-        if to_node not in self.nodes:
-            self.add_node(to_node)
+    def record_fuzzy_match(self):
+        self.metrics['fuzzy_matches'] += 1
+    
+    def record_cache_hit(self):
+        self.metrics['cache_hits'] += 1
+    
+    def record_cache_miss(self):
+        self.metrics['cache_misses'] += 1
+    
+    def record_query_time(self, query_time: float):
+        self.metrics['query_times'].append(query_time)
+    
+    def update_cache_size(self, size: int):
+        self.metrics['cache_size'] = size
+    
+    def get_summary(self) -> Dict[str, Any]:
+        query_times = self.metrics['query_times']
+        return {
+            'exact_matches': self.metrics['exact_matches'],
+            'fuzzy_matches': self.metrics['fuzzy_matches'],
+            'cache_hits': self.metrics['cache_hits'],
+            'cache_misses': self.metrics['cache_misses'],
+            'cache_hit_rate': self.metrics['cache_hits'] / max(1, self.metrics['cache_hits'] + self.metrics['cache_misses']),
+            'avg_query_time': sum(query_times) / max(1, len(query_times)),
+            'cache_size': self.metrics['cache_size']
+        }
+
+class MemoryGraph:
+    def __init__(self, cache_size: int = 1000, similarity_threshold: float = 0.7):
+        # Hash-based indexing for exact matches
+        self.hash_index: Dict[str, MemoryRecord] = {}
+        
+        # Vector storage for semantic similarity
+        self.vector_index: List[MemoryRecord] = []
+        self.vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
+        self.vectorizer_fitted = False
+        
+        # LRU cache for frequently accessed memories
+        self.cache: Dict[str, MemoryRecord] = {}
+        self.cache_size = cache_size
+        self.access_counter = Counter()
+        
+        # Similarity threshold for fuzzy matching
+        self.similarity_threshold = similarity_threshold
+        
+        # Metrics collection
+        self.metrics = MetricsCollector()
+    
+    def _hash_content(self, content: str) -> str:
+        """Generate a hash for content-based exact matching."""
+        return hashlib.sha256(content.encode('utf-8')).hexdigest()
+    
+    def _vectorize_content(self, contents: List[str]) -> np.ndarray:
+        """Convert text contents to TF-IDF vectors."""
+        if not self.vectorizer_fitted:
+            vectors = self.vectorizer.fit_transform(contents)
+            self.vectorizer_fitted = True
+        else:
+            vectors = self.vectorizer.transform(contents)
+        return vectors.toarray()
+    
+    def add_memory(self, memory_id: str, content: str):
+        """Add a new memory to the graph."""
+        # Create memory record
+        record = MemoryRecord(id=memory_id, content=content)
+        
+        # Add to hash index
+        content_hash = self._hash_content(content)
+        self.hash_index[content_hash] = record
+        
+        # Add to vector index
+        self.vector_index.append(record)
+        
+        # Re-vectorize all contents when adding new memory
+        all_contents = [rec.content for rec in self.vector_index]
+        vectors = self._vectorize_content(all_contents)
+        
+        # Update vectors in records
+        for i, record in enumerate(self.vector_index):
+            record.vector = vectors[i]
+    
+    def _update_cache(self, record: MemoryRecord):
+        """Update LRU cache with accessed record."""
+        self.access_counter[record.id] += 1
+        record.access_count += 1
+        record.last_accessed = time.time()
+        
+        if record.id in self.cache:
+            self.metrics.record_cache_hit()
+        else:
+            self.metrics.record_cache_miss()
+            self.cache[record.id] = record
             
-        self.edges[from_node].add(to_node)
-        self.edges[to_node].add(from_node)
-    
-    def get_neighbors(self, node_id):
-        """Get all neighbors of a node"""
-        return self.edges.get(node_id, set())
-    
-    def bidirectional_bfs(self, start, end):
-        """
-        Bidirectional BFS implementation for finding shortest path
-        Time complexity: O(√n) in average case instead of O(n)
-        """
-        if start == end:
-            return [start]
+            # Maintain cache size
+            if len(self.cache) > self.cache_size:
+                # Remove least recently used item
+                lru_id = min(self.cache.keys(), 
+                           key=lambda k: self.cache[k].last_accessed)
+                del self.cache[lru_id]
         
-        if start not in self.nodes or end not in self.nodes:
-            return None
-        
-        # Forward search from start
-        forward_queue = [start]
-        forward_visited = {start: None}
-        
-        # Backward search from end
-        backward_queue = [end]
-        backward_visited = {end: None}
-        
-        while forward_queue or backward_queue:
-            # Forward search step
-            if forward_queue:
-                current = forward_queue.pop(0)
-                
-                # Check if we've met the backward search
-                if current in backward_visited:
-                    return self._reconstruct_path(forward_visited, backward_visited, current)
-                
-                for neighbor in self.get_neighbors(current):
-                    if neighbor not in forward_visited:
-                        forward_visited[neighbor] = current
-                        forward_queue.append(neighbor)
-            
-            # Backward search step
-            if backward_queue:
-                current = backward_queue.pop(0)
-                
-                # Check if we've met the forward search
-                if current in forward_visited:
-                    return self._reconstruct_path(forward_visited, backward_visited, current)
-                
-                for neighbor in self.get_neighbors(current):
-                    if neighbor not in backward_visited:
-                        backward_visited[neighbor] = current
-                        backward_queue.append(neighbor)
-        
-        return None  # No path found
+        self.metrics.update_cache_size(len(self.cache))
     
-    def _reconstruct_path(self, forward_visited, backward_visited, meeting_point):
-        """Reconstruct the path from both search directions"""
-        # Build path from start to meeting point
-        path_forward = []
-        current = meeting_point
-        while current is not None:
-            path_forward.append(current)
-            current = forward_visited[current]
-        path_forward.reverse()
-        
-        # Build path from meeting point to end
-        path_backward = []
-        current = backward_visited[meeting_point]
-        while current is not None:
-            path_backward.append(current)
-            current = backward_visited[current]
-        
-        return path_forward + path_backward
+    def retrieve_exact(self, content: str) -> Optional[MemoryRecord]:
+        """Retrieve memory using exact hash match."""
+        content_hash = self._hash_content(content)
+        if content_hash in self.hash_index:
+            record = self.hash_index[content_hash]
+            self._update_cache(record)
+            self.metrics.record_exact_match()
+            return record
+        return None
     
-    def find_shortest_path(self, start, end):
-        """Public API for finding shortest path using bidirectional BFS"""
-        return self.bidirectional_bfs(start, end)
-    
-    def get_all_nodes(self):
-        """Get all node IDs"""
-        return list(self.nodes.keys())
-    
-    def get_node_data(self, node_id):
-        """Get data associated with a node"""
-        return self.nodes.get(node_id)
-    
-    def set_node_data(self, node_id, data):
-        """Set data for a node"""
-        if node_id in self.nodes:
-            self.nodes[node_id] = data
-    
-    def remove_node(self, node_id):
-        """Remove a node and all its edges"""
-        if node_id in self.nodes:
-            del self.nodes[node_id]
-            del self.edges[node_id]
-            
-            # Remove references to this node in other nodes' edge lists
-            for node_edges in self.edges.values():
-                node_edges.discard(node_id)
-    
-    def remove_edge(self, from_node, to_node):
-        """Remove a bidirectional edge between two nodes"""
-        if from_node in self.edges:
-            self.edges[from_node].discard(to_node)
-        if to_node in self.edges:
-            self.edges[to_node].discard(from_node)
-    
-    def has_node(self, node_id):
-        """Check if a node exists in the graph"""
-        return node_id in self.nodes
-    
-    def has_edge(self, from_node, to_node):
-        """Check if an edge exists between two nodes"""
-        return (from_node in self.edges and 
-                to_node in self.edges[from_node])
-    
-    def get_subgraph(self, node_ids):
-        """Get a subgraph containing only specified nodes"""
-        subgraph = MemoryGraph()
-        for node_id in node_ids:
-            if node_id in self.nodes:
-                subgraph.add_node(node_id, self.nodes[node_id])
-        
-        for node_id in node_ids:
-            if node_id in self.edges:
-                for neighbor in self.edges[node_id]:
-                    if neighbor in node_ids:
-                        subgraph.add_edge(node_id, neighbor)
-        
-        return subgraph
-    
-    def bfs_traversal(self, start_node, max_depth=None):
-        """Traditional BFS traversal from a starting node"""
-        if start_node not in self.nodes:
+    def retrieve_fuzzy(self, content: str, top_k: int = 5) -> List[Tuple[MemoryRecord, float]]:
+        """Retrieve memories using semantic similarity."""
+        if not self.vector_index:
             return []
         
-        visited = set()
-        queue = [(start_node, 0)]  # (node, depth)
-        result = []
+        # Vectorize query content
+        query_vector = self._vectorize_content([content])[0].reshape(1, -1)
         
-        while queue:
-            node, depth = queue.pop(0)
-            
-            if node in visited:
-                continue
-                
-            if max_depth is not None and depth > max_depth:
-                continue
-                
-            visited.add(node)
-            result.append(node)
-            
-            for neighbor in self.get_neighbors(node):
-                if neighbor not in visited:
-                    queue.append((neighbor, depth + 1))
+        # Calculate similarities
+        similarities = []
+        for record in self.vector_index:
+            if record.vector is not None:
+                sim = cosine_similarity(query_vector, record.vector.reshape(1, -1))[0][0]
+                if sim >= self.similarity_threshold:
+                    similarities.append((record, sim))
         
-        return result
+        # Sort by similarity and return top-k
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        results = similarities[:top_k]
+        
+        if results:
+            self.metrics.record_fuzzy_match()
+        
+        return results
     
-    def dfs_traversal(self, start_node, max_depth=None):
-        """DFS traversal from a starting node"""
-        if start_node not in self.nodes:
-            return []
+    def retrieve(self, content: str, top_k: int = 5) -> List[Tuple[MemoryRecord, float]]:
+        """Hybrid retrieval using exact match first, then fuzzy match."""
+        start_time = time.time()
         
-        visited = set()
-        result = []
+        # Check cache first
+        content_hash = self._hash_content(content)
+        for record in self.cache.values():
+            if record.content == content:
+                self._update_cache(record)
+                self.metrics.record_query_time(time.time() - start_time)
+                return [(record, 1.0)]
         
-        def dfs_helper(node, depth):
-            if node in visited:
-                return
-            if max_depth is not None and depth > max_depth:
-                return
-                
-            visited.add(node)
-            result.append(node)
-            
-            for neighbor in self.get_neighbors(node):
-                dfs_helper(neighbor, depth + 1)
+        # Try exact match
+        exact_record = self.retrieve_exact(content)
+        if exact_record:
+            self.metrics.record_query_time(time.time() - start_time)
+            return [(exact_record, 1.0)]
         
-        dfs_helper(start_node, 0)
-        return result
+        # Fall back to fuzzy matching
+        results = self.retrieve_fuzzy(content, top_k)
+        self.metrics.record_query_time(time.time() - start_time)
+        return results
     
-    def get_connected_components(self):
-        """Get all connected components in the graph"""
-        visited = set()
-        components = []
-        
-        for node in self.nodes:
-            if node not in visited:
-                component = self.bfs_traversal(node)
-                components.append(component)
-                visited.update(component)
-        
-        return components
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get performance metrics."""
+        return self.metrics.get_summary()
     
-    def is_connected(self, node_a, node_b):
-        """Check if two nodes are connected"""
-        return self.bidirectional_bfs(node_a, node_b) is not None
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get detailed cache statistics."""
+        if not self.access_counter:
+            return {}
+        
+        total_accesses = sum(self.access_counter.values())
+        return {
+            'access_counts': dict(self.access_counter.most_common(10)),
+            'total_accesses': total_accesses,
+            'unique_memories_accessed': len(self.access_counter)
+        }
+
+# Example usage
+if __name__ == "__main__":
+    # Create memory graph
+    mg = MemoryGraph(cache_size=100, similarity_threshold=0.5)
     
-    def get_shortest_distance(self, start, end):
-        """Get the shortest distance between two nodes"""
-        path = self.bidirectional_bfs(start, end)
-        return len(path) - 1 if path else -1
+    # Add some memories
+    mg.add_memory("mem1", "The quick brown fox jumps over the lazy dog")
+    mg.add_memory("mem2", "A quick brown fox leaps over a sleepy dog")
+    mg.add_memory("mem3", "Python is a high-level programming language")
+    mg.add_memory("mem4", "Java is a popular programming language")
+    
+    # Retrieve exact match
+    result = mg.retrieve("The quick brown fox jumps over the lazy dog")
+    print("Exact match:", [r[0].id for r in result])
+    
+    # Retrieve fuzzy match
+    result = mg.retrieve("A fast brown fox jumps over a tired dog")
+    print("Fuzzy match:", [(r[0].id, r[1]) for r in result])
+    
+    # Retrieve another fuzzy match
+    result = mg.retrieve("Programming with Python")
+    print("Another fuzzy match:", [(r[0].id, r[1]) for r in result])
+    
+    # Print metrics
+    print("\nMetrics:", mg.get_metrics())
+    print("Cache stats:", mg.get_cache_stats())
