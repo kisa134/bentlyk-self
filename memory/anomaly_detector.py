@@ -1,181 +1,239 @@
+import json
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Tuple
+from datetime import datetime
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-
-from memory.coherence_tracker import CoherenceTracker
-from memory.delta_analyzer import DeltaAnalyzer, MemoryDelta
-
-logger = logging.getLogger(__name__)
+from pathlib import Path
 
 @dataclass
-class Anomaly:
-    """Represents a detected anomaly in memory access patterns."""
-    timestamp: datetime
-    type: str
+class MemoryAnomaly:
+    timestamp: str
+    anomaly_type: str
     description: str
     severity: str
-    context: Dict[str, Any]
-    resolved: bool = False
+    suggested_fix: str
+    data_points: Dict[str, Any]
 
 class AnomalyDetector:
-    """Detects anomalies in memory access patterns by comparing expected vs actual behavior."""
-    
-    def __init__(self, coherence_tracker: CoherenceTracker, delta_analyzer: DeltaAnalyzer):
-        self.coherence_tracker = coherence_tracker
-        self.delta_analyzer = delta_analyzer
-        self.anomalies: List[Anomaly] = []
-        self.alert_thresholds = {
-            'coherence_violation': 0.8,
-            'unexpected_delta': 0.7,
-            'access_pattern': 0.75
-        }
+    def __init__(self, log_file: str = "anomaly_detection.log"):
+        self.setup_logging(log_file)
+        self.anomalies: List[MemoryAnomaly] = []
         
-    def detect_anomalies(self, memory_delta: MemoryDelta) -> List[Anomaly]:
-        """Analyze a memory delta for anomalies and return any detected issues."""
-        detected_anomalies = []
-        
-        # Check for coherence violations
-        coherence_anomalies = self._check_coherence_violations(memory_delta)
-        detected_anomalies.extend(coherence_anomalies)
-        
-        # Check for unexpected deltas
-        delta_anomalies = self._check_unexpected_deltas(memory_delta)
-        detected_anomalies.extend(delta_anomalies)
-        
-        # Check access patterns
-        pattern_anomalies = self._check_access_patterns(memory_delta)
-        detected_anomalies.extend(pattern_anomalies)
-        
-        # Add to tracking
-        self.anomalies.extend(detected_anomalies)
-        return detected_anomalies
-    
-    def _check_coherence_violations(self, memory_delta: MemoryDelta) -> List[Anomaly]:
-        """Check for coherence violations in the memory delta."""
-        anomalies = []
-        
-        # Get expected coherence state
-        expected_coherence = self.coherence_tracker.get_expected_coherence(
-            memory_delta.key, 
-            memory_delta.timestamp
+    def setup_logging(self, log_file: str):
+        """Setup logging configuration"""
+        logging.basicConfig(
+            filename=log_file,
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
         )
+        self.logger = logging.getLogger(__name__)
         
-        if expected_coherence is not None:
-            # Calculate coherence score
-            coherence_score = self.coherence_tracker.calculate_coherence_score(
-                memory_delta.key,
-                memory_delta.value,
-                memory_delta.timestamp
-            )
+    def load_inspector_data(self, file_path: str) -> Dict:
+        """Load memory data from self_inspector.py"""
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            self.logger.error(f"Inspector data file not found: {file_path}")
+            return {}
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in inspector data: {e}")
+            return {}
             
-            if coherence_score < self.alert_thresholds['coherence_violation']:
-                anomaly = Anomaly(
-                    timestamp=memory_delta.timestamp,
-                    type='coherence_violation',
-                    description=f'Coherence score {coherence_score:.2f} below threshold for key {memory_delta.key}',
-                    severity='high' if coherence_score < 0.5 else 'medium',
-                    context={
-                        'key': memory_delta.key,
-                        'expected_coherence': expected_coherence,
-                        'actual_coherence': coherence_score,
-                        'value': memory_delta.value
-                    }
-                )
-                anomalies.append(anomaly)
-                logger.warning(f"Coherence violation detected: {anomaly.description}")
-                
-        return anomalies
+    def load_coherence_data(self, file_path: str) -> Dict:
+        """Load memory data from coherence_tracker.py"""
+        try:
+            with open(file_path, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            self.logger.error(f"Coherence data file not found: {file_path}")
+            return {}
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in coherence data: {e}")
+            return {}
     
-    def _check_unexpected_deltas(self, memory_delta: MemoryDelta) -> List[Anomaly]:
-        """Check for unexpected changes in memory values."""
+    def compare_memory_states(self, inspector_data: Dict, coherence_data: Dict) -> List[MemoryAnomaly]:
+        """Compare memory states between inspector and coherence tracker"""
         anomalies = []
         
-        # Analyze the delta for unexpected patterns
-        delta_analysis = self.delta_analyzer.analyze_delta(memory_delta)
+        # Check for missing memory regions
+        inspector_regions = set(inspector_data.get('memory_regions', {}).keys())
+        coherence_regions = set(coherence_data.get('tracked_regions', {}).keys())
         
-        if delta_analysis.confidence < self.alert_thresholds['unexpected_delta']:
-            anomaly = Anomaly(
-                timestamp=memory_delta.timestamp,
-                type='unexpected_delta',
-                description=f'Unexpected delta detected for key {memory_delta.key}',
-                severity='medium',
-                context={
-                    'key': memory_delta.key,
-                    'analysis': delta_analysis,
-                    'confidence': delta_analysis.confidence
-                }
-            )
-            anomalies.append(anomaly)
-            logger.warning(f"Unexpected delta detected: {anomaly.description}")
+        if inspector_regions != coherence_regions:
+            missing_in_coherence = inspector_regions - coherence_regions
+            missing_in_inspector = coherence_regions - inspector_regions
             
-        return anomalies
-    
-    def _check_access_patterns(self, memory_delta: MemoryDelta) -> List[Anomaly]:
-        """Check for anomalous access patterns."""
-        anomalies = []
-        
-        # Get historical access pattern
-        historical_pattern = self.coherence_tracker.get_access_pattern(memory_delta.key)
-        
-        if historical_pattern:
-            # Calculate pattern deviation
-            deviation = self._calculate_pattern_deviation(
-                memory_delta, 
-                historical_pattern
-            )
-            
-            if deviation > self.alert_thresholds['access_pattern']:
-                anomaly = Anomaly(
-                    timestamp=memory_delta.timestamp,
-                    type='access_pattern',
-                    description=f'Access pattern deviation {deviation:.2f} for key {memory_delta.key}',
-                    severity='high' if deviation > 0.9 else 'medium',
-                    context={
-                        'key': memory_delta.key,
-                        'deviation': deviation,
-                        'historical_pattern': historical_pattern
+            if missing_in_coherence:
+                anomalies.append(MemoryAnomaly(
+                    timestamp=datetime.now().isoformat(),
+                    anomaly_type="MISSING_REGIONS",
+                    description=f"Memory regions missing in coherence tracker: {missing_in_coherence}",
+                    severity="HIGH",
+                    suggested_fix="Ensure all memory regions are registered in coherence tracker",
+                    data_points={
+                        "missing_regions": list(missing_in_coherence),
+                        "inspector_regions": list(inspector_regions),
+                        "coherence_regions": list(coherence_regions)
                     }
-                )
-                anomalies.append(anomaly)
-                logger.warning(f"Access pattern anomaly detected: {anomaly.description}")
+                ))
                 
+            if missing_in_inspector:
+                anomalies.append(MemoryAnomaly(
+                    timestamp=datetime.now().isoformat(),
+                    anomaly_type="UNTRACKED_REGIONS",
+                    description=f"Memory regions in coherence tracker but not inspector: {missing_in_inspector}",
+                    severity="MEDIUM",
+                    suggested_fix="Verify inspector is monitoring all tracked regions",
+                    data_points={
+                        "untracked_regions": list(missing_in_inspector),
+                        "inspector_regions": list(inspector_regions),
+                        "coherence_regions": list(coherence_regions)
+                    }
+                ))
+        
+        # Check for memory access inconsistencies
+        self._check_access_patterns(inspector_data, coherence_data, anomalies)
+        
+        # Check for timing discrepancies
+        self._check_timing_consistency(inspector_data, coherence_data, anomalies)
+        
         return anomalies
     
-    def _calculate_pattern_deviation(self, memory_delta: MemoryDelta, historical_pattern: Dict) -> float:
-        """Calculate deviation from historical access patterns."""
-        # Simplified pattern deviation calculation
-        # In a real implementation, this would use more sophisticated pattern matching
-        current_time = memory_delta.timestamp
-        time_diff = abs((current_time - historical_pattern.get('last_access', current_time)).total_seconds())
+    def _check_access_patterns(self, inspector_data: Dict, coherence_data: Dict, anomalies: List[MemoryAnomaly]):
+        """Check for inconsistent memory access patterns"""
+        inspector_access = inspector_data.get('access_patterns', {})
+        coherence_access = coherence_data.get('access_patterns', {})
         
-        # Normalize time difference (assuming patterns repeat within 24 hours)
-        normalized_diff = min(time_diff / (24 * 3600), 1.0)
-        return normalized_diff
+        for region, inspector_stats in inspector_access.items():
+            if region in coherence_access:
+                coherence_stats = coherence_access[region]
+                
+                # Check read/write discrepancy
+                inspector_reads = inspector_stats.get('reads', 0)
+                inspector_writes = inspector_stats.get('writes', 0)
+                coherence_reads = coherence_stats.get('reads', 0)
+                coherence_writes = coherence_stats.get('writes', 0)
+                
+                read_diff = abs(inspector_reads - coherence_reads)
+                write_diff = abs(inspector_writes - coherence_writes)
+                
+                if read_diff > inspector_reads * 0.1:  # 10% threshold
+                    anomalies.append(MemoryAnomaly(
+                        timestamp=datetime.now().isoformat(),
+                        anomaly_type="READ_COUNT_MISMATCH",
+                        description=f"Read count mismatch for region {region}: inspector={inspector_reads}, coherence={coherence_reads}",
+                        severity="MEDIUM",
+                        suggested_fix="Synchronize access counters between inspector and coherence tracker",
+                        data_points={
+                            "region": region,
+                            "inspector_reads": inspector_reads,
+                            "coherence_reads": coherence_reads,
+                            "difference": read_diff
+                        }
+                    ))
+                    
+                if write_diff > inspector_writes * 0.1:  # 10% threshold
+                    anomalies.append(MemoryAnomaly(
+                        timestamp=datetime.now().isoformat(),
+                        anomaly_type="WRITE_COUNT_MISMATCH",
+                        description=f"Write count mismatch for region {region}: inspector={inspector_writes}, coherence={coherence_writes}",
+                        severity="MEDIUM",
+                        suggested_fix="Synchronize access counters between inspector and coherence tracker",
+                        data_points={
+                            "region": region,
+                            "inspector_writes": inspector_writes,
+                            "coherence_writes": coherence_writes,
+                            "difference": write_diff
+                        }
+                    ))
     
-    def get_active_anomalies(self) -> List[Anomaly]:
-        """Return all unresolved anomalies."""
-        return [a for a in self.anomalies if not a.resolved]
-    
-    def resolve_anomaly(self, anomaly: Anomaly) -> None:
-        """Mark an anomaly as resolved."""
-        anomaly.resolved = True
-        logger.info(f"Anomaly resolved: {anomaly.description}")
-    
-    def get_anomaly_summary(self) -> Dict[str, Any]:
-        """Get a summary of detected anomalies."""
-        active_anomalies = self.get_active_anomalies()
+    def _check_timing_consistency(self, inspector_data: Dict, coherence_data: Dict, anomalies: List[MemoryAnomaly]):
+        """Check for timing inconsistencies between systems"""
+        inspector_timestamp = inspector_data.get('last_update', '')
+        coherence_timestamp = coherence_data.get('last_update', '')
         
-        severity_counts = {'high': 0, 'medium': 0, 'low': 0}
-        type_counts = {}
+        if inspector_timestamp and coherence_timestamp:
+            try:
+                from datetime import datetime
+                inspector_time = datetime.fromisoformat(inspector_timestamp.replace('Z', '+00:00'))
+                coherence_time = datetime.fromisoformat(coherence_timestamp.replace('Z', '+00:00'))
+                
+                time_diff = abs((inspector_time - coherence_time).total_seconds())
+                
+                if time_diff > 5:  # 5 second threshold
+                    anomalies.append(MemoryAnomaly(
+                        timestamp=datetime.now().isoformat(),
+                        anomaly_type="TIMING_MISMATCH",
+                        description=f"Significant time difference between systems: {time_diff} seconds",
+                        severity="LOW",
+                        suggested_fix="Synchronize system clocks or implement time synchronization",
+                        data_points={
+                            "inspector_time": inspector_timestamp,
+                            "coherence_time": coherence_timestamp,
+                            "difference_seconds": time_diff
+                        }
+                    ))
+            except ValueError:
+                # Handle invalid timestamp formats
+                anomalies.append(MemoryAnomaly(
+                    timestamp=datetime.now().isoformat(),
+                    anomaly_type="TIMESTAMP_PARSE_ERROR",
+                    description="Could not parse timestamp formats for comparison",
+                    severity="LOW",
+                    suggested_fix="Ensure consistent timestamp formats between systems",
+                    data_points={
+                        "inspector_timestamp": inspector_timestamp,
+                        "coherence_timestamp": coherence_timestamp
+                    }
+                ))
+    
+    def detect_memory_leaks(self, inspector_data: Dict) -> List[MemoryAnomaly]:
+        """Detect potential memory leaks from inspector data"""
+        anomalies = []
+        regions = inspector_data.get('memory_regions', {})
         
-        for anomaly in active_anomalies:
-            severity_counts[anomaly.severity] += 1
-            type_counts[anomaly.type] = type_counts.get(anomaly.type, 0) + 1
+        for region_name, region_data in regions.items():
+            # Check for regions with high allocation but low deallocation
+            allocations = region_data.get('allocations', 0)
+            deallocations = region_data.get('deallocations', 0)
             
-        return {
-            'total_active': len(active_anomalies),
-            'by_severity': severity_counts,
-            'by_type': type_counts,
-            'timestamp': datetime.now()
-        }
+            if allocations > 0 and deallocations == 0:
+                anomalies.append(MemoryAnomaly(
+                    timestamp=datetime.now().isoformat(),
+                    anomaly_type="POTENTIAL_MEMORY_LEAK",
+                    description=f"Region {region_name} has {allocations} allocations but 0 deallocations",
+                    severity="HIGH" if allocations > 100 else "MEDIUM",
+                    suggested_fix="Ensure proper deallocation of memory regions or implement garbage collection",
+                    data_points={
+                        "region": region_name,
+                        "allocations": allocations,
+                        "deallocations": deallocations
+                    }
+                ))
+            elif allocations > 0:
+                leak_ratio = (allocations - deallocations) / allocations
+                if leak_ratio > 0.9:  # 90% or more allocations not deallocated
+                    anomalies.append(MemoryAnomaly(
+                        timestamp=datetime.now().isoformat(),
+                        anomaly_type="HIGH_LEAK_RATIO",
+                        description=f"Region {region_name} has high leak ratio: {leak_ratio:.2%}",
+                        severity="HIGH",
+                        suggested_fix="Investigate deallocation patterns and implement cleanup routines",
+                        data_points={
+                            "region": region_name,
+                            "allocations": allocations,
+                            "deallocations": deallocations,
+                            "leak_ratio": leak_ratio
+                        }
+                    ))
+        
+        return anomalies
+    
+    def detect_coherence_issues(self, coherence_data: Dict) -> List[MemoryAnomaly]:
+        """Detect coherence-related issues"""
+        anomalies = []
+        tracked_regions = coherence_data.get('tracked_regions', {})
+        
+        for region_name, region_data in tracked_regions.items():
+            coherence_violations = region_data.get('coherence
