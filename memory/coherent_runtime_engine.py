@@ -1,263 +1,257 @@
 import sys
-import traceback
-from typing import Any, Dict, List, Optional, Tuple, Callable
-from dataclasses import dataclass, field
-from enum import Enum
-import json
 import threading
-from collections import defaultdict
-
-class ProcessingMode(Enum):
-    RUSSIAN = "russian"
-    ENGLISH = "english"
-
-@dataclass
-class SemanticTrace:
-    mode: ProcessingMode
-    step: str
-    data: Any
-    timestamp: float
-    stack_trace: List[str] = field(default_factory=list)
-    context: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class DivergencePoint:
-    step: str
-    russian_trace: SemanticTrace
-    english_trace: SemanticTrace
-    differences: Dict[str, Any]
-
-class SnapshotHook:
-    def __init__(self):
-        self.snapshots: List[SemanticTrace] = []
-        self.lock = threading.Lock()
-    
-    def capture(self, mode: ProcessingMode, step: str, data: Any, context: Optional[Dict[str, Any]] = None):
-        stack_trace = traceback.format_stack()[:-1]  # Exclude this function call
-        trace = SemanticTrace(
-            mode=mode,
-            step=step,
-            data=data,
-            timestamp=self._get_timestamp(),
-            stack_trace=stack_trace,
-            context=context or {}
-        )
-        
-        with self.lock:
-            self.snapshots.append(trace)
-    
-    def _get_timestamp(self) -> float:
-        import time
-        return time.time()
-    
-    def get_snapshots_by_mode(self, mode: ProcessingMode) -> List[SemanticTrace]:
-        with self.lock:
-            return [s for s in self.snapshots if s.mode == mode]
-    
-    def clear(self):
-        with self.lock:
-            self.snapshots.clear()
-
-class SemanticComparator:
-    def __init__(self):
-        self.hook = SnapshotHook()
-        self.divergence_points: List[DivergencePoint] = []
-    
-    def compare_traces(self) -> List[DivergencePoint]:
-        russian_traces = {t.step: t for t in self.hook.get_snapshots_by_mode(ProcessingMode.RUSSIAN)}
-        english_traces = {t.step: t for t in self.hook.get_snapshots_by_mode(ProcessingMode.ENGLISH)}
-        
-        all_steps = set(russian_traces.keys()) | set(english_traces.keys())
-        self.divergence_points = []
-        
-        for step in all_steps:
-            ru_trace = russian_traces.get(step)
-            en_trace = english_traces.get(step)
-            
-            if ru_trace and en_trace:
-                differences = self._compare_semantic_data(ru_trace.data, en_trace.data)
-                if differences:
-                    self.divergence_points.append(DivergencePoint(
-                        step=step,
-                        russian_trace=ru_trace,
-                        english_trace=en_trace,
-                        differences=differences
-                    ))
-            elif ru_trace or en_trace:
-                # Missing trace in one mode
-                self.divergence_points.append(DivergencePoint(
-                    step=step,
-                    russian_trace=ru_trace,
-                    english_trace=en_trace,
-                    differences={"missing_trace": f"Missing in {'Russian' if en_trace else 'English'} mode"}
-                ))
-        
-        return self.divergence_points
-    
-    def _compare_semantic_data(self, ru_data: Any, en_data: Any) -> Dict[str, Any]:
-        differences = {}
-        
-        if type(ru_data) != type(en_data):
-            differences["type_mismatch"] = {
-                "russian": type(ru_data).__name__,
-                "english": type(en_data).__name__
-            }
-            return differences
-        
-        if isinstance(ru_data, dict) and isinstance(en_data, dict):
-            ru_keys = set(ru_data.keys())
-            en_keys = set(en_data.keys())
-            
-            if ru_keys != en_keys:
-                differences["key_difference"] = {
-                    "russian_only": list(ru_keys - en_keys),
-                    "english_only": list(en_keys - ru_keys)
-                }
-            
-            common_keys = ru_keys & en_keys
-            for key in common_keys:
-                sub_diff = self._compare_semantic_data(ru_data[key], en_data[key])
-                if sub_diff:
-                    differences[f"key_{key}"] = sub_diff
-                    
-        elif isinstance(ru_data, (list, tuple)) and isinstance(en_data, (list, tuple)):
-            if len(ru_data) != len(en_data):
-                differences["length_mismatch"] = {
-                    "russian": len(ru_data),
-                    "english": len(en_data)
-                }
-            else:
-                for i, (ru_item, en_item) in enumerate(zip(ru_data, en_data)):
-                    sub_diff = self._compare_semantic_data(ru_item, en_item)
-                    if sub_diff:
-                        differences[f"index_{i}"] = sub_diff
-                        
-        elif ru_data != en_data:
-            differences["value_mismatch"] = {
-                "russian": ru_data,
-                "english": en_data
-            }
-            
-        return differences
+import traceback
+import time
+import logging
+from collections import defaultdict, deque
+from typing import Dict, List, Tuple, Any, Callable
+import hashlib
+import json
+import gc
 
 class CoherentRuntimeEngine:
-    def __init__(self):
-        self.comparator = SemanticComparator()
-        self.is_testing = False
-        self.test_results: Dict[str, Any] = {}
-    
-    def process_russian(self, input_data: Any) -> Any:
-        self.comparator.hook.capture(ProcessingMode.RUSSIAN, "start", input_data)
+    def __init__(self, max_trace_length: int = 1000, replay_window: int = 50):
+        self.max_trace_length = max_trace_length
+        self.replay_window = replay_window
+        self.divergence_threshold = 0.7
+        self.semantic_map: Dict[str, float] = {}
+        self.trace_buffer = deque(maxlen=max_trace_length)
+        self.runtime_stack: List[Tuple[str, Any]] = []
+        self.divergence_events: List[Dict] = []
+        self.lock = threading.RLock()
+        self.monitor_active = True
+        self.replay_mode = False
+        self.instrumentation_points: Dict[str, Callable] = {}
+        self.validation_rules: Dict[str, Callable[[Any], bool]] = {}
         
-        # Simulate Russian processing logic
-        result = self._russian_processing_logic(input_data)
-        
-        self.comparator.hook.capture(ProcessingMode.RUSSIAN, "end", result)
-        return result
-    
-    def process_english(self, input_data: Any) -> Any:
-        self.comparator.hook.capture(ProcessingMode.ENGLISH, "start", input_data)
-        
-        # Simulate English processing logic
-        result = self._english_processing_logic(input_data)
-        
-        self.comparator.hook.capture(ProcessingMode.ENGLISH, "end", result)
-        return result
-    
-    def _russian_processing_logic(self, data: Any) -> Any:
-        self.comparator.hook.capture(ProcessingMode.RUSSIAN, "normalize", data)
-        if isinstance(data, str):
-            normalized = data.lower().replace("ё", "е")
-        else:
-            normalized = data
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler('runtime_coherence.log'),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def instrument_function(self, name: str, func: Callable) -> Callable:
+        """Instrument a function for coherence monitoring"""
+        def wrapper(*args, **kwargs):
+            with self.lock:
+                # Capture pre-execution state
+                pre_state = self._capture_runtime_state()
+                self.runtime_stack.append((name, {'args': args, 'kwargs': kwargs, 'pre_state': pre_state}))
+                
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                except Exception as e:
+                    self._handle_exception(e, name)
+                    raise
+                finally:
+                    # Capture post-execution state
+                    post_state = self._capture_runtime_state()
+                    if self.runtime_stack:
+                        _, call_info = self.runtime_stack.pop()
+                        call_info['post_state'] = post_state
+                        call_info['timestamp'] = time.time()
+                        self.trace_buffer.append(call_info)
+        self.instrumentation_points[name] = wrapper
+        return wrapper
+
+    def add_validation_rule(self, name: str, rule: Callable[[Any], bool]):
+        """Add semantic validation rule"""
+        self.validation_rules[name] = rule
+
+    def _capture_runtime_state(self) -> Dict[str, Any]:
+        """Capture current runtime state for divergence analysis"""
+        state = {
+            'memory_usage': len(gc.get_objects()),
+            'thread_count': threading.active_count(),
+            'trace_position': len(self.trace_buffer),
+            'semantic_hash': self._compute_semantic_hash()
+        }
+        return state
+
+    def _compute_semantic_hash(self) -> str:
+        """Compute semantic consistency hash"""
+        semantic_data = str(sorted(self.semantic_map.items()))
+        return hashlib.md5(semantic_data.encode()).hexdigest()
+
+    def monitor_semantic_coherence(self):
+        """Continuously monitor for semantic divergence"""
+        while self.monitor_active:
+            try:
+                with self.lock:
+                    if len(self.trace_buffer) > 1:
+                        divergence = self._detect_divergence()
+                        if divergence > self.divergence_threshold:
+                            self._handle_divergence(divergence)
+            except Exception as e:
+                self.logger.error(f"Monitor error: {e}")
             
-        self.comparator.hook.capture(ProcessingMode.RUSSIAN, "tokenize", normalized)
-        if isinstance(normalized, str):
-            tokens = normalized.split()
-        else:
-            tokens = normalized
+            time.sleep(0.1)  # Check every 100ms
+
+    def _detect_divergence(self) -> float:
+        """Detect semantic divergence between Russian and English contexts"""
+        # Simulate semantic analysis - in practice this would interface with NLP models
+        russian_score = self.semantic_map.get('russian_context', 0.5)
+        english_score = self.semantic_map.get('english_context', 0.5)
+        divergence = abs(russian_score - english_score)
+        return min(divergence, 1.0)
+
+    def _handle_divergence(self, divergence_level: float):
+        """Handle detected semantic divergence"""
+        event = {
+            'timestamp': time.time(),
+            'divergence_level': divergence_level,
+            'stack_trace': self._get_full_stack_trace(),
+            'runtime_state': self._capture_runtime_state()
+        }
+        
+        self.divergence_events.append(event)
+        self.logger.warning(f"Semantic divergence detected: {divergence_level:.3f}")
+        
+        # Trigger localized replay
+        self._trigger_localized_replay()
+
+    def _handle_exception(self, exception: Exception, function_name: str):
+        """Handle exceptions during execution"""
+        event = {
+            'timestamp': time.time(),
+            'exception_type': type(exception).__name__,
+            'exception_message': str(exception),
+            'function_name': function_name,
+            'stack_trace': self._get_full_stack_trace(),
+            'runtime_state': self._capture_runtime_state()
+        }
+        
+        self.divergence_events.append(event)
+        self.logger.error(f"Exception in {function_name}: {exception}")
+
+    def _get_full_stack_trace(self) -> List[str]:
+        """Capture full stack trace"""
+        stack_lines = []
+        for frame_info in traceback.extract_stack():
+            stack_lines.append(f"{frame_info.filename}:{frame_info.lineno} in {frame_info.name}")
+        return stack_lines
+
+    def _trigger_localized_replay(self):
+        """Trigger localized replay for diagnosis"""
+        if len(self.trace_buffer) < self.replay_window:
+            return
             
-        self.comparator.hook.capture(ProcessingMode.RUSSIAN, "process_tokens", tokens)
-        # Russian-specific processing
-        processed = [f"RU_{token}" for token in tokens] if isinstance(tokens, list) else tokens
+        self.replay_mode = True
+        self.logger.info("Starting localized replay...")
         
-        return processed
-    
-    def _english_processing_logic(self, data: Any) -> Any:
-        self.comparator.hook.capture(ProcessingMode.ENGLISH, "normalize", data)
-        if isinstance(data, str):
-            normalized = data.lower()
-        else:
-            normalized = data
-            
-        self.comparator.hook.capture(ProcessingMode.ENGLISH, "tokenize", normalized)
-        if isinstance(normalized, str):
-            tokens = normalized.split()
-        else:
-            tokens = normalized
-            
-        self.comparator.hook.capture(ProcessingMode.ENGLISH, "process_tokens", tokens)
-        # English-specific processing
-        processed = [f"EN_{token}" for token in tokens] if isinstance(tokens, list) else tokens
+        # Get recent execution context
+        replay_context = list(self.trace_buffer)[-self.replay_window:]
         
-        return processed
-    
-    def run_coherence_check(self, input_data: Any) -> Tuple[Any, Any, List[DivergencePoint]]:
-        self.comparator.hook.clear()
-        
-        ru_result = self.process_russian(input_data)
-        en_result = self.process_english(input_data)
-        
-        divergences = self.comparator.compare_traces()
-        
-        return ru_result, en_result, divergences
-    
-    def run_known_incoherence_tests(self) -> Dict[str, Any]:
-        test_cases = [
-            {
-                "name": "case_1_cyrillic_chars",
-                "input": "ёжик в тумане",
-                "expected_divergence": True
-            },
-            {
-                "name": "case_2_mixed_script",
-                "input": "hello мир",
-                "expected_divergence": True
-            },
-            {
-                "name": "case_3_numeric_data",
-                "input": {"число": 42, "number": 42},
-                "expected_divergence": True
+        try:
+            self._execute_replay(replay_context)
+        except Exception as e:
+            self.logger.error(f"Replay failed: {e}")
+        finally:
+            self.replay_mode = False
+            self.logger.info("Replay completed")
+
+    def _execute_replay(self, context: List[Dict]):
+        """Execute localized replay of recent operations"""
+        for call_info in context:
+            function_name = None
+            for name, instrumented_func in self.instrumentation_points.items():
+                if hasattr(instrumented_func, '__name__') and instrumented_func.__name__ == call_info.get('function_name'):
+                    function_name = name
+                    break
+                    
+            if function_name and function_name in self.instrumentation_points:
+                try:
+                    # Re-execute with original parameters
+                    args = call_info.get('args', ())
+                    kwargs = call_info.get('kwargs', {})
+                    self.instrumentation_points[function_name](*args, **kwargs)
+                except Exception as e:
+                    self.logger.error(f"Replay error in {function_name}: {e}")
+
+    def update_semantic_context(self, language: str, score: float):
+        """Update semantic context scores"""
+        with self.lock:
+            context_key = f"{language.lower()}_context"
+            self.semantic_map[context_key] = max(0.0, min(1.0, score))
+
+    def get_divergence_report(self) -> Dict[str, Any]:
+        """Get comprehensive divergence report"""
+        with self.lock:
+            return {
+                'total_events': len(self.divergence_events),
+                'current_divergence': self._detect_divergence(),
+                'recent_events': self.divergence_events[-10:] if self.divergence_events else [],
+                'semantic_map': self.semantic_map.copy(),
+                'trace_buffer_size': len(self.trace_buffer)
             }
-        ]
-        
-        results = {}
-        
-        for test_case in test_cases:
-            name = test_case["name"]
-            input_data = test_case["input"]
-            
-            ru_result, en_result, divergences = self.run_coherence_check(input_data)
-            
-            results[name] = {
-                "input": input_data,
-                "russian_result": ru_result,
-                "english_result": en_result,
-                "divergences_found": len(divergences) > 0,
-                "divergences": [
-                    {
-                        "step": d.step,
-                        "differences": d.differences
-                    } for d in divergences
-                ],
-                "passed": len(divergences) > 0 == test_case.get("expected_divergence", False)
-            }
-        
-        return results
+
+    def start_monitoring(self):
+        """Start coherence monitoring thread"""
+        monitor_thread = threading.Thread(target=self.monitor_semantic_coherence, daemon=True)
+        monitor_thread.start()
+        self.logger.info("Coherent runtime engine started")
+
+    def stop_monitoring(self):
+        """Stop coherence monitoring"""
+        self.monitor_active = False
+        self.logger.info("Coherent runtime engine stopped")
 
 # Global engine instance
 engine = CoherentRuntimeEngine()
 
-def run_semantic_comparison(input_data: Any) -> Dict[str, Any]:
-    """Public API to run semantic comparison between Russian and English processing"""
-    ru_result
+# Decorator for automatic instrumentation
+def coherent_function(name: str):
+    def decorator(func):
+        return engine.instrument_function(name, func)
+    return decorator
+
+# Public API
+def start_coherence_monitoring():
+    engine.start_monitoring()
+
+def stop_coherence_monitoring():
+    engine.stop_monitoring()
+
+def update_russian_semantics(score: float):
+    engine.update_semantic_context('russian', score)
+
+def update_english_semantics(score: float):
+    engine.update_semantic_context('english', score)
+
+def add_semantic_validation(name: str, rule: Callable[[Any], bool]):
+    engine.add_validation_rule(name, rule)
+
+def get_coherence_report() -> Dict[str, Any]:
+    return engine.get_divergence_report()
+
+if __name__ == "__main__":
+    # Example usage
+    @coherent_function("data_processor")
+    def process_data(data):
+        # Simulate some processing
+        result = {"processed": data, "timestamp": time.time()}
+        return result
+
+    @coherent_function("validator")
+    def validate_input(input_data):
+        if not isinstance(input_data, dict):
+            raise ValueError("Input must be a dictionary")
+        return True
+
+    # Add validation rules
+    add_semantic_validation("data_structure", lambda x: isinstance(x, dict) and 'required_field' in x)
+
+    # Start monitoring
+    start_coherence_monitoring()
+    
+    try:
+        # Simulate normal operation
+        test_data = {"required_field": "value", "data": [1, 2, 3]}
+        validate_input(test_data)
+        result = process_data
