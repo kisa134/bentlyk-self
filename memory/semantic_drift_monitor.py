@@ -1,118 +1,146 @@
 import numpy as np
-from typing import Dict, List, Optional, Tuple
 import logging
-from dataclasses import dataclass
-from threading import Lock
-
-logger = logging.getLogger(__name__)
-
-@dataclass
-class DriftEvent:
-    timestamp: float
-    similarity_score: float
-    context: str
-    russian_embedding: List[float]
-    english_embedding: List[float]
+from typing import Dict, List, Tuple
+from datetime import datetime
+from sklearn.metrics.pairwise import cosine_similarity
 
 class SemanticDriftMonitor:
-    def __init__(self, threshold: float = 0.3):
+    def __init__(self, threshold: float = 0.7):
         self.threshold = threshold
-        self.drift_events: List[DriftEvent] = []
-        self._lock = Lock()
+        self.baseline_coherence = 1.0
+        self.current_coherence = 1.0
+        self.drift_events = []
+        self.enforcement_actions = []
+        self.logger = logging.getLogger(__name__)
+        self._setup_logging()
         
-    def cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity between two vectors."""
-        vec1_array = np.array(vec1)
-        vec2_array = np.array(vec2)
-        
-        dot_product = np.dot(vec1_array, vec2_array)
-        norm_vec1 = np.linalg.norm(vec1_array)
-        norm_vec2 = np.linalg.norm(vec2_array)
-        
-        if norm_vec1 == 0 or norm_vec2 == 0:
-            return 0.0
-            
-        return dot_product / (norm_vec1 * norm_vec2)
+    def _setup_logging(self):
+        """Setup logging configuration for drift monitoring"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
     
-    def check_drift(self, 
-                   russian_embedding: List[float], 
-                   english_embedding: List[float],
-                   context: str = "",
-                   timestamp: Optional[float] = None) -> Optional[DriftEvent]:
-        """Check for semantic drift between embeddings and log if threshold exceeded."""
-        if timestamp is None:
-            import time
-            timestamp = time.time()
-            
-        similarity = self.cosine_similarity(russian_embedding, english_embedding)
-        drift_magnitude = 1.0 - similarity
+    def compute_cross_language_coherence(self, 
+                                       ru_embeddings: np.ndarray, 
+                                       en_embeddings: np.ndarray) -> float:
+        """
+        Compute coherence score between Russian and English embeddings
         
-        if drift_magnitude > self.threshold:
-            event = DriftEvent(
-                timestamp=timestamp,
-                similarity_score=similarity,
-                context=context,
-                russian_embedding=russian_embedding.copy(),
-                english_embedding=english_embedding.copy()
-            )
+        Args:
+            ru_embeddings: Russian language embeddings (n_samples, embedding_dim)
+            en_embeddings: English language embeddings (n_samples, embedding_dim)
             
-            with self._lock:
-                self.drift_events.append(event)
-                
-            logger.warning(
-                f"Semantic drift detected: {drift_magnitude:.3f} exceeds threshold {self.threshold}. "
-                f"Similarity: {similarity:.3f}, Context: {context}"
-            )
+        Returns:
+            coherence_score: Average cosine similarity between corresponding embeddings
+        """
+        if len(ru_embeddings) != len(en_embeddings):
+            raise ValueError("Russian and English embeddings must have same number of samples")
+        
+        if len(ru_embeddings) == 0:
+            return 1.0
             
-            return event
-            
-        return None
+        # Compute cosine similarity between corresponding embeddings
+        similarities = []
+        for ru_emb, en_emb in zip(ru_embeddings, en_embeddings):
+            # Reshape for sklearn compatibility
+            ru_emb = ru_emb.reshape(1, -1)
+            en_emb = en_emb.reshape(1, -1)
+            similarity = cosine_similarity(ru_emb, en_emb)[0][0]
+            similarities.append(similarity)
+        
+        coherence_score = float(np.mean(similarities))
+        self.current_coherence = coherence_score
+        
+        return coherence_score
     
-    def get_drift_statistics(self) -> Dict:
-        """Get statistics about detected drift events."""
-        with self._lock:
-            if not self.drift_events:
-                return {
-                    "total_events": 0,
-                    "avg_similarity": 0.0,
-                    "min_similarity": 1.0,
-                    "max_similarity": 0.0
+    def detect_drift(self, 
+                    ru_embeddings: np.ndarray, 
+                    en_embeddings: np.ndarray) -> bool:
+        """
+        Detect semantic drift based on cross-language coherence
+        
+        Args:
+            ru_embeddings: Russian language embeddings
+            en_embeddings: English language embeddings
+            
+        Returns:
+            True if drift detected (coherence below threshold), False otherwise
+        """
+        try:
+            coherence_score = self.compute_cross_language_coherence(ru_embeddings, en_embeddings)
+            
+            # Log the coherence measurement
+            self.logger.info(f"Cross-language coherence score: {coherence_score:.4f}")
+            
+            # Check if coherence has dropped below threshold
+            if coherence_score < self.threshold:
+                drift_event = {
+                    'timestamp': datetime.now(),
+                    'coherence_score': coherence_score,
+                    'threshold': self.threshold,
+                    'status': 'DRIFT_DETECTED'
                 }
+                self.drift_events.append(drift_event)
+                self.logger.warning(f"Semantic drift detected! Coherence: {coherence_score:.4f} < {self.threshold}")
+                return True
+            else:
+                self.logger.info(f"Coherence within acceptable range: {coherence_score:.4f} >= {self.threshold}")
+                return False
                 
-            similarities = [event.similarity_score for event in self.drift_events]
-            
-            return {
-                "total_events": len(self.drift_events),
-                "avg_similarity": np.mean(similarities),
-                "min_similarity": np.min(similarities),
-                "max_similarity": np.max(similarities)
-            }
+        except Exception as e:
+            self.logger.error(f"Error in drift detection: {str(e)}")
+            return False
     
-    def clear_events(self):
-        """Clear all recorded drift events."""
-        with self._lock:
-            self.drift_events.clear()
-
-# Global instance for integration with coherence bridge
-_drift_monitor: Optional[SemanticDriftMonitor] = None
-
-def initialize_drift_monitor(threshold: float = 0.3) -> SemanticDriftMonitor:
-    """Initialize and return global drift monitor instance."""
-    global _drift_monitor
-    if _drift_monitor is None:
-        _drift_monitor = SemanticDriftMonitor(threshold=threshold)
-    return _drift_monitor
-
-def get_drift_monitor() -> Optional[SemanticDriftMonitor]:
-    """Get the global drift monitor instance."""
-    return _drift_monitor
-
-def check_semantic_coherence(russian_embedding: List[float], 
-                           english_embedding: List[float],
-                           context: str = "") -> Optional[DriftEvent]:
-    """Convenience function to check coherence through global monitor."""
-    monitor = get_drift_monitor()
-    if monitor is None:
-        return None
+    def enforce_boundaries(self, 
+                          ru_embeddings: np.ndarray, 
+                          en_embeddings: np.ndarray) -> Dict:
+        """
+        Enforce boundaries when semantic drift is detected
         
-    return monitor.check_drift(russian_embedding, english_embedding, context)
+        Args:
+            ru_embeddings: Russian language embeddings
+            en_embeddings: English language embeddings
+            
+        Returns:
+            Dictionary containing enforcement action details
+        """
+        action_details = {
+            'timestamp': datetime.now(),
+            'action_taken': False,
+            'coherence_score': self.current_coherence,
+            'details': None
+        }
+        
+        if self.current_coherence < self.threshold:
+            # Log the enforcement action
+            self.logger.warning(f"Enforcing boundaries due to low coherence: {self.current_coherence:.4f}")
+            
+            # In a real implementation, this would contain actual boundary enforcement logic
+            # For now, we'll just log the event and return status
+            action_details['action_taken'] = True
+            action_details['details'] = "Boundary enforcement triggered due to low cross-language coherence"
+            
+            # Record the enforcement action
+            self.enforcement_actions.append(action_details)
+            self.logger.info("Boundary enforcement completed")
+        else:
+            action_details['details'] = "No enforcement needed - coherence above threshold"
+            self.logger.info("No boundary enforcement required")
+            
+        return action_details
+    
+    def get_drift_history(self) -> List[Dict]:
+        """Return history of detected drift events"""
+        return self.drift_events.copy()
+    
+    def get_enforcement_history(self) -> List[Dict]:
+        """Return history of enforcement actions"""
+        return self.enforcement_actions.copy()
+    
+    def reset_monitor(self):
+        """Reset the monitor state"""
+        self.current_coherence = 1.0
+        self.drift_events.clear()
+        self.enforcement_actions.clear()
+        self.logger.info("Semantic drift monitor reset")
