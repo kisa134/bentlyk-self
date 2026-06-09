@@ -1,177 +1,273 @@
-import time
-import threading
-from collections import deque
-from typing import Dict, List, Tuple, Optional
 import numpy as np
+import logging
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
-
-@dataclass
-class SemanticFrame:
-    language: str
-    concepts: List[str]
-    confidence: float
-    timestamp: float
+from collections import deque
+import threading
+import time
 
 @dataclass
 class CoherenceMetrics:
-    transition_latency: float
-    semantic_drift: float
-    conceptual_load: float
     timestamp: float
+    russian_embed: np.ndarray
+    english_embed: np.ndarray
+    divergence_score: float
+    coherence_score: float
+    alignment_triggered: bool
 
 class CoherenceRuntimeInstrument:
-    def __init__(self, threshold_initial: float = 0.7, adaptation_rate: float = 0.01):
-        self.threshold = threshold_initial
-        self.adaptation_rate = adaptation_rate
-        self.frame_history = deque(maxlen=100)
+    def __init__(self, 
+                 divergence_threshold: float = 0.3,
+                 window_size: int = 10,
+                 log_level: int = logging.INFO):
+        """
+        Initialize the coherence runtime instrument.
+        
+        Args:
+            divergence_threshold: Threshold for triggering alignment prompts
+            window_size: Number of recent samples to consider for metrics
+            log_level: Logging level for coherence monitoring
+        """
+        self.divergence_threshold = divergence_threshold
+        self.window_size = window_size
+        
+        # Metrics tracking
         self.metrics_history = deque(maxlen=1000)
-        self.lock = threading.RLock()
-        self.last_transition_time = None
-        self.active_monitoring = False
+        self.recent_samples = deque(maxlen=window_size)
+        
+        # Threading safety
+        self._lock = threading.Lock()
+        
+        # Setup logging
+        self.logger = logging.getLogger("CoherenceMonitor")
+        self.logger.setLevel(log_level)
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        
+        # Alignment prompt templates
+        self.alignment_prompts = {
+            'russian_to_english': "Please clarify the meaning of this concept in English context.",
+            'english_to_russian': "Пожалуйста, уточните значение этой концепции в русском контексте.",
+            'bidirectional': "Let's ensure both Russian and English perspectives align properly."
+        }
+        
+        self.running = False
         self.monitor_thread = None
         
-    def start_monitoring(self):
-        """Start the runtime monitoring thread"""
-        with self.lock:
-            if not self.active_monitoring:
-                self.active_monitoring = True
-                self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-                self.monitor_thread.start()
-    
-    def stop_monitoring(self):
-        """Stop the runtime monitoring"""
-        with self.lock:
-            self.active_monitoring = False
-            if self.monitor_thread:
-                self.monitor_thread.join()
-    
-    def record_semantic_frame(self, frame: SemanticFrame):
-        """Record a semantic frame for analysis"""
-        with self.lock:
-            self.frame_history.append(frame)
-            if len(self.frame_history) >= 2:
-                self._analyze_coherence()
-    
-    def _analyze_coherence(self):
-        """Analyze coherence between recent semantic frames"""
-        if len(self.frame_history) < 2:
-            return
+    def cosine_similarity(self, a: np.ndarray, b: np.ndarray) -> float:
+        """Calculate cosine similarity between two embedding vectors."""
+        if len(a.shape) == 1:
+            a = a.reshape(1, -1)
+        if len(b.shape) == 1:
+            b = b.reshape(1, -1)
             
-        current = self.frame_history[-1]
-        previous = self.frame_history[-2]
+        dot_product = np.dot(a, b.T)
+        norm_a = np.linalg.norm(a, axis=1)
+        norm_b = np.linalg.norm(b, axis=1)
         
-        # Skip if same language
-        if current.language == previous.language:
-            return
-            
-        # Calculate metrics
-        latency = self._calculate_transition_latency(current, previous)
-        drift = self._calculate_semantic_drift(current, previous)
-        load = self._calculate_conceptual_load(current, previous)
-        
-        metrics = CoherenceMetrics(latency, drift, load, current.timestamp)
-        self.metrics_history.append(metrics)
-        
-        # Check for misalignment
-        coherence_score = self._calculate_coherence_score(metrics)
-        if coherence_score < self.threshold:
-            self._trigger_coherence_bridge(current, previous, coherence_score)
-            self._adapt_threshold(coherence_score)
+        similarity = dot_product / (norm_a[:, None] * norm_b[None, :])
+        return float(np.mean(similarity))
     
-    def _calculate_transition_latency(self, current: SemanticFrame, previous: SemanticFrame) -> float:
-        """Calculate time latency between language transitions"""
-        if self.last_transition_time:
-            return current.timestamp - self.last_transition_time
-        return 0.0
+    def calculate_divergence(self, 
+                           russian_embed: np.ndarray, 
+                           english_embed: np.ndarray) -> float:
+        """
+        Calculate divergence between Russian and English embeddings.
+        Lower similarity indicates higher divergence.
+        """
+        similarity = self.cosine_similarity(russian_embed, english_embed)
+        divergence = 1.0 - similarity
+        return max(0.0, min(1.0, divergence))  # Clamp between 0 and 1
     
-    def _calculate_semantic_drift(self, current: SemanticFrame, previous: SemanticFrame) -> float:
-        """Calculate semantic drift between frames using Jaccard similarity"""
-        current_set = set(current.concepts)
-        previous_set = set(previous.concepts)
-        
-        if not current_set and not previous_set:
-            return 0.0
-            
-        intersection = len(current_set.intersection(previous_set))
-        union = len(current_set.union(previous_set))
-        
-        if union == 0:
+    def calculate_coherence_score(self) -> float:
+        """Calculate overall coherence score based on recent divergence metrics."""
+        if not self.recent_samples:
             return 1.0
             
-        return 1.0 - (intersection / union)
+        avg_divergence = np.mean([sample.divergence_score for sample in self.recent_samples])
+        coherence_score = 1.0 - avg_divergence
+        return max(0.0, min(1.0, coherence_score))
     
-    def _calculate_conceptual_load(self, current: SemanticFrame, previous: SemanticFrame) -> float:
-        """Calculate conceptual load as complexity of translation"""
-        # Load is inversely proportional to confidence and directly to concept count
-        current_complexity = len(current.concepts) * (1.0 - current.confidence)
-        previous_complexity = len(previous.concepts) * (1.0 - previous.confidence)
-        
-        return (current_complexity + previous_complexity) / 2.0
+    def should_trigger_alignment(self, divergence_score: float) -> bool:
+        """Determine if alignment prompt should be triggered."""
+        return divergence_score > self.divergence_threshold
     
-    def _calculate_coherence_score(self, metrics: CoherenceMetrics) -> float:
-        """Calculate overall coherence score from metrics"""
-        # Normalize metrics to 0-1 range
-        normalized_latency = min(1.0, metrics.transition_latency / 2.0)  # Assume 2s threshold
-        normalized_drift = metrics.semantic_drift
-        normalized_load = min(1.0, metrics.conceptual_load / 10.0)  # Assume 10 concept threshold
+    def get_alignment_prompt(self, 
+                           russian_context: str = "",
+                           english_context: str = "") -> Optional[str]:
+        """
+        Generate appropriate alignment prompt based on context.
+        Returns None if no alignment is needed.
+        """
+        with self._lock:
+            if not self.recent_samples:
+                return None
+                
+            latest_sample = self.recent_samples[-1]
+            if not latest_sample.alignment_triggered:
+                return None
+            
+            # Simple heuristic for prompt selection
+            if russian_context and not english_context:
+                return self.alignment_prompts['russian_to_english']
+            elif english_context and not russian_context:
+                return self.alignment_prompts['english_to_russian']
+            else:
+                return self.alignment_prompts['bidirectional']
+    
+    def update_embeddings(self, 
+                         russian_embed: np.ndarray, 
+                         english_embed: np.ndarray,
+                         timestamp: Optional[float] = None) -> CoherenceMetrics:
+        """
+        Update embeddings and calculate coherence metrics.
         
-        # Weighted combination - higher weight on semantic drift
-        score = (
-            0.3 * (1.0 - normalized_latency) +
-            0.5 * (1.0 - normalized_drift) +
-            0.2 * (1.0 - normalized_load)
+        Args:
+            russian_embed: Russian language embedding vector
+            english_embed: English language embedding vector
+            timestamp: Optional timestamp, defaults to current time
+            
+        Returns:
+            CoherenceMetrics object with current metrics
+        """
+        if timestamp is None:
+            timestamp = time.time()
+            
+        with self._lock:
+            # Calculate metrics
+            divergence_score = self.calculate_divergence(russian_embed, english_embed)
+            alignment_triggered = self.should_trigger_alignment(divergence_score)
+            
+            # Create metrics object
+            metrics = CoherenceMetrics(
+                timestamp=timestamp,
+                russian_embed=russian_embed.copy(),
+                english_embed=english_embed.copy(),
+                divergence_score=divergence_score,
+                coherence_score=0.0,  # Will be updated below
+                alignment_triggered=alignment_triggered
+            )
+            
+            # Update history
+            self.recent_samples.append(metrics)
+            self.metrics_history.append(metrics)
+            
+            # Update coherence score
+            coherence_score = self.calculate_coherence_score()
+            metrics.coherence_score = coherence_score
+            
+            # Log metrics
+            self.logger.info(
+                f"Coherence: {coherence_score:.3f}, "
+                f"Divergence: {divergence_score:.3f}, "
+                f"Alignment: {'YES' if alignment_triggered else 'NO'}"
+            )
+            
+            return metrics
+    
+    def get_recent_metrics(self, n: int = 10) -> List[CoherenceMetrics]:
+        """Get the n most recent coherence metrics."""
+        with self._lock:
+            return list(self.recent_samples)[-n:]
+    
+    def get_average_coherence(self, window: int = None) -> float:
+        """Get average coherence score over specified window."""
+        with self._lock:
+            if not self.recent_samples:
+                return 1.0
+                
+            if window is None:
+                window = len(self.recent_samples)
+                
+            samples = list(self.recent_samples)[-window:]
+            if not samples:
+                return 1.0
+                
+            return float(np.mean([s.coherence_score for s in samples]))
+    
+    def start_monitoring(self, check_interval: float = 1.0):
+        """Start background monitoring thread."""
+        if self.running:
+            return
+            
+        self.running = True
+        self.monitor_thread = threading.Thread(
+            target=self._monitor_loop, 
+            args=(check_interval,),
+            daemon=True
         )
-        
-        return max(0.0, min(1.0, score))
+        self.monitor_thread.start()
     
-    def _trigger_coherence_bridge(self, current: SemanticFrame, previous: SemanticFrame, coherence_score: float):
-        """Trigger the coherence bridge when misalignment is detected"""
-        print(f"COHERENCE ALERT: Misalignment detected between {previous.language} and {current.language}")
-        print(f"  Coherence Score: {coherence_score:.3f} (threshold: {self.threshold:.3f})")
-        print(f"  Semantic Drift: {self._calculate_semantic_drift(current, previous):.3f}")
-        print(f"  Conceptual Load: {self._calculate_conceptual_load(current, previous):.3f}")
-        
-        # In a real implementation, this would trigger the actual coherence bridge
-        self._activate_bridge_mechanism(current, previous)
+    def stop_monitoring(self):
+        """Stop background monitoring."""
+        self.running = False
+        if self.monitor_thread:
+            self.monitor_thread.join()
     
-    def _activate_bridge_mechanism(self, current: SemanticFrame, previous: SemanticFrame):
-        """Activate the coherence bridge mechanism"""
-        # Placeholder for actual bridge activation logic
-        self.last_transition_time = time.time()
-        pass
-    
-    def _adapt_threshold(self, coherence_score: float):
-        """Dynamically adjust threshold based on performance"""
-        error = coherence_score - self.threshold
-        self.threshold = max(0.1, min(0.9, self.threshold + self.adaptation_rate * error))
-    
-    def _monitor_loop(self):
-        """Main monitoring loop"""
-        while self.active_monitoring:
-            time.sleep(0.01)  # 10ms monitoring interval
-            # Additional real-time monitoring logic could go here
+    def _monitor_loop(self, check_interval: float):
+        """Background monitoring loop."""
+        while self.running:
+            try:
+                with self._lock:
+                    if self.recent_samples:
+                        coherence = self.calculate_coherence_score()
+                        self.logger.debug(f"Background coherence check: {coherence:.3f}")
+                        
+                        # Log warning if coherence is low
+                        if coherence < 0.5:
+                            self.logger.warning(
+                                f"Low coherence detected: {coherence:.3f}"
+                            )
+                            
+            except Exception as e:
+                self.logger.error(f"Error in monitoring loop: {e}")
+                
+            time.sleep(check_interval)
     
     def get_metrics_summary(self) -> Dict[str, float]:
-        """Get summary of recent metrics"""
-        with self.lock:
+        """Get summary statistics of coherence metrics."""
+        with self._lock:
             if not self.metrics_history:
-                return {}
-                
-            latencies = [m.transition_latency for m in self.metrics_history]
-            drifts = [m.semantic_drift for m in self.metrics_history]
-            loads = [m.conceptual_load for m in self.metrics_history]
+                return {
+                    'total_samples': 0,
+                    'avg_coherence': 1.0,
+                    'avg_divergence': 0.0,
+                    'max_divergence': 0.0,
+                    'alignment_triggers': 0
+                }
+            
+            coherences = [m.coherence_score for m in self.metrics_history]
+            divergences = [m.divergence_score for m in self.metrics_history]
+            alignments = [1 if m.alignment_triggered else 0 for m in self.metrics_history]
             
             return {
-                'avg_latency': np.mean(latencies) if latencies else 0.0,
-                'avg_drift': np.mean(drifts) if drifts else 0.0,
-                'avg_load': np.mean(loads) if loads else 0.0,
-                'threshold': self.threshold,
-                'samples': len(self.metrics_history)
+                'total_samples': len(self.metrics_history),
+                'avg_coherence': float(np.mean(coherences)),
+                'avg_divergence': float(np.mean(divergences)),
+                'max_divergence': float(np.max(divergences)),
+                'alignment_triggers': sum(alignments)
             }
     
-    def reset_metrics(self):
-        """Reset metrics history"""
-        with self.lock:
-            self.metrics_history.clear()
-            self.frame_history.clear()
-            self.last_transition_time = None
+    def __enter__(self):
+        """Context manager entry."""
+        self.start_monitoring()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.stop_monitoring()
+
+# Example usage
+if __name__ == "__main__":
+    # Example with dummy embeddings
+    instrument = CoherenceRuntimeInstrument(divergence_threshold=0.3)
+    
+    # Simulate some embedding updates
+    for i in range(20):
+        # Create dummy embeddings (in practice, these would come from your model)
+        russian_emb = np.random.rand(768
