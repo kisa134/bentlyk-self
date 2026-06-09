@@ -1,252 +1,222 @@
-import time
+import sys
+import gc
+import psutil
+import logging
 import threading
+from typing import Dict, Any, Callable, List, Optional
 from collections import defaultdict, deque
-from typing import Dict, List, Tuple, Optional, Callable
-from dataclasses import dataclass
-from enum import Enum
-import weakref
+from datetime import datetime, timedelta
+import time
 
-class AccessType(Enum):
-    READ = "READ"
-    WRITE = "WRITE"
-
-@dataclass
-class MemoryAccessRecord:
-    timestamp: float
-    address: int
-    access_type: AccessType
-    data_size: int
-    latency: float
-    thread_id: int
-
-class AnomalyDetector:
-    def __init__(self, window_size: int = 100, latency_threshold: float = 0.001):
-        self.window_size = window_size
-        self.latency_threshold = latency_threshold
-        self.access_history: deque = deque(maxlen=window_size)
-        self._lock = threading.Lock()
-        
-    def add_record(self, record: MemoryAccessRecord) -> bool:
-        with self._lock:
-            self.access_history.append(record)
-            return self._detect_anomaly(record)
-    
-    def _detect_anomaly(self, record: MemoryAccessRecord) -> bool:
-        if len(self.access_history) < 10:
-            return False
-            
-        # Check for high latency
-        if record.latency > self.latency_threshold:
-            return True
-            
-        # Check for unusual access patterns
-        recent_writes = [r for r in self.access_history 
-                        if r.access_type == AccessType.WRITE and 
-                        abs(r.address - record.address) < 1024]
-        
-        if len(recent_writes) > 5 and record.access_type == AccessType.READ:
-            # Rapid write-then-read pattern might indicate coherence issues
-            return True
-            
-        return False
-
-class CoherenceScorer:
-    def __init__(self, window_size: int = 50):
-        self.window_size = window_size
-        self.access_patterns: deque = deque(maxlen=window_size)
-        self._lock = threading.Lock()
-        
-    def add_record(self, record: MemoryAccessRecord):
-        with self._lock:
-            self.access_patterns.append(record)
-    
-    def calculate_coherence_score(self) -> float:
-        with self._lock:
-            if len(self.access_patterns) < 5:
-                return 1.0
-                
-            # Calculate spatial locality score
-            addresses = [r.address for r in self.access_patterns]
-            spatial_score = self._calculate_spatial_locality(addresses)
-            
-            # Calculate temporal locality score
-            timestamps = [r.timestamp for r in self.access_patterns]
-            temporal_score = self._calculate_temporal_locality(timestamps)
-            
-            # Combine scores
-            return (spatial_score + temporal_score) / 2.0
-    
-    def _calculate_spatial_locality(self, addresses: List[int]) -> float:
-        if len(addresses) < 2:
-            return 1.0
-            
-        distances = [abs(addresses[i] - addresses[i-1]) for i in range(1, len(addresses))]
-        avg_distance = sum(distances) / len(distances)
-        
-        # Normalize: closer addresses = higher score
-        return max(0.0, min(1.0, 1000.0 / (avg_distance + 1)))
-    
-    def _calculate_temporal_locality(self, timestamps: List[float]) -> float:
-        if len(timestamps) < 2:
-            return 1.0
-            
-        intervals = [timestamps[i] - timestamps[i-1] for i in range(1, len(timestamps))]
-        avg_interval = sum(intervals) / len(intervals)
-        
-        # Normalize: shorter intervals = higher score
-        return max(0.0, min(1.0, 1.0 / (avg_interval * 1000 + 0.1)))
+from memory.anomaly_detector import AnomalyDetector, AnomalyReport
 
 class RuntimeIntrospection:
-    def __init__(self, enable_tracing: bool = True):
-        self.enable_tracing = enable_tracing
-        self.access_log: List[MemoryAccessRecord] = []
-        self.anomaly_detector = AnomalyDetector()
-        self.coherence_scorer = CoherenceScorer()
-        self.hooks: Dict[str, List[Callable]] = {
-            'anomaly_detected': [],
-            'access_logged': [],
-            'coherence_updated': []
-        }
-        self._lock = threading.RLock()
-        self._stats = {
-            'total_accesses': 0,
-            'read_count': 0,
-            'write_count': 0,
-            'anomalies_detected': 0,
-            'total_latency': 0.0
-        }
+    def __init__(self, anomaly_detector: AnomalyDetector, log_level: int = logging.INFO):
+        self.anomaly_detector = anomaly_detector
+        self.logger = self._setup_logger(log_level)
+        self.hooks: List[Callable[[AnomalyReport], None]] = []
+        self.review_threshold = 0.8  # Threshold for human review
+        self.anomaly_history = deque(maxlen=1000)
+        self.lock = threading.Lock()
         
-    def register_hook(self, hook_type: str, callback: Callable):
-        """Register a callback for specific events"""
-        if hook_type in self.hooks:
-            self.hooks[hook_type].append(callback)
+    def _setup_logger(self, log_level: int) -> logging.Logger:
+        logger = logging.getLogger('RuntimeIntrospection')
+        logger.setLevel(log_level)
+        if not logger.handlers:
+            handler = logging.StreamHandler(sys.stdout)
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        return logger
     
-    def _trigger_hooks(self, hook_type: str, *args, **kwargs):
-        """Trigger all registered hooks of a specific type"""
-        for callback in self.hooks.get(hook_type, []):
+    def add_hook(self, hook: Callable[[AnomalyReport], None]) -> None:
+        """Add a hook function to be called when anomalies are detected."""
+        with self.lock:
+            self.hooks.append(hook)
+    
+    def set_review_threshold(self, threshold: float) -> None:
+        """Set the threshold for triggering human review."""
+        if not 0 <= threshold <= 1:
+            raise ValueError("Threshold must be between 0 and 1")
+        self.review_threshold = threshold
+    
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """Get current memory statistics."""
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        gc_stats = gc.get_stats()
+        
+        return {
+            'timestamp': datetime.now(),
+            'process_memory_rss': mem_info.rss,
+            'process_memory_vms': mem_info.vms,
+            'system_memory_percent': psutil.virtual_memory().percent,
+            'gc_collections': sum(stat['collections'] for stat in gc_stats),
+            'gc_collected': sum(stat['collected'] for stat in gc_stats),
+            'gc_uncollectable': sum(stat['uncollectable'] for stat in gc_stats),
+            'object_count': len(gc.get_objects())
+        }
+    
+    def detect_anomalies(self) -> List[AnomalyReport]:
+        """Detect anomalies in current memory state."""
+        stats = self.get_memory_stats()
+        anomalies = self.anomaly_detector.detect(stats)
+        
+        with self.lock:
+            for anomaly in anomalies:
+                self.anomaly_history.append(anomaly)
+                self._trigger_hooks(anomaly)
+                self._handle_anomaly(anomaly)
+        
+        return anomalies
+    
+    def _trigger_hooks(self, anomaly: AnomalyReport) -> None:
+        """Trigger all registered hooks for an anomaly."""
+        for hook in self.hooks:
             try:
-                callback(*args, **kwargs)
-            except Exception:
-                pass  # Silently ignore hook errors
+                hook(anomaly)
+            except Exception as e:
+                self.logger.error(f"Hook execution failed: {e}")
     
-    def log_access(self, address: int, access_type: AccessType, data_size: int, 
-                   start_time: float, end_time: float):
-        """Log a memory access operation"""
-        if not self.enable_tracing:
-            return
-            
-        latency = end_time - start_time
-        record = MemoryAccessRecord(
-            timestamp=start_time,
-            address=address,
-            access_type=access_type,
-            data_size=data_size,
-            latency=latency,
-            thread_id=threading.get_ident()
+    def _handle_anomaly(self, anomaly: AnomalyReport) -> None:
+        """Handle anomaly based on severity and review threshold."""
+        self.logger.warning(
+            f"Anomaly detected: {anomaly.type} - Severity: {anomaly.severity:.2f} - "
+            f"Details: {anomaly.details}"
         )
         
-        with self._lock:
-            self.access_log.append(record)
-            self._update_stats(record)
-            
-            # Update coherence scorer
-            self.coherence_scorer.add_record(record)
-            
-            # Check for anomalies
-            is_anomaly = self.anomaly_detector.add_record(record)
-            if is_anomaly:
-                self._stats['anomalies_detected'] += 1
-                self._trigger_hooks('anomaly_detected', record)
-            
-            self._trigger_hooks('access_logged', record)
+        if anomaly.severity >= self.review_threshold:
+            self._trigger_human_review(anomaly)
     
-    def _update_stats(self, record: MemoryAccessRecord):
-        """Update internal statistics"""
-        self._stats['total_accesses'] += 1
-        self._stats['total_latency'] += record.latency
+    def _trigger_human_review(self, anomaly: AnomalyReport) -> None:
+        """Trigger human review process for high-severity anomalies."""
+        self.logger.critical(
+            f"HUMAN REVIEW REQUIRED - High severity anomaly: {anomaly.type} "
+            f"(Severity: {anomaly.severity:.2f})"
+        )
+        # In a real implementation, this would notify operators or trigger alerts
+        # For now, we just log it as critical
+    
+    def get_anomaly_summary(self, hours: int = 24) -> Dict[str, Any]:
+        """Get a summary of anomalies from the last N hours."""
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        recent_anomalies = [
+            a for a in self.anomaly_history 
+            if a.timestamp >= cutoff_time
+        ]
         
-        if record.access_type == AccessType.READ:
-            self._stats['read_count'] += 1
-        else:
-            self._stats['write_count'] += 1
-    
-    def get_access_summary(self) -> Dict:
-        """Get a summary of memory access patterns"""
-        with self._lock:
-            if self._stats['total_accesses'] == 0:
-                return {'coherence_score': 1.0, 'stats': self._stats.copy()}
-            
-            avg_latency = self._stats['total_latency'] / self._stats['total_accesses']
-            coherence_score = self.coherence_scorer.calculate_coherence_score()
-            
+        if not recent_anomalies:
             return {
-                'coherence_score': coherence_score,
-                'average_latency': avg_latency,
-                'stats': self._stats.copy()
+                'total_anomalies': 0,
+                'anomalies_by_type': {},
+                'average_severity': 0.0,
+                'high_severity_count': 0
             }
-    
-    def get_recent_accesses(self, count: int = 50) -> List[MemoryAccessRecord]:
-        """Get the most recent memory accesses"""
-        with self._lock:
-            return list(self.access_log[-count:]) if self.access_log else []
-    
-    def clear_log(self):
-        """Clear the access log"""
-        with self._lock:
-            self.access_log.clear()
-            self._stats = {
-                'total_accesses': 0,
-                'read_count': 0,
-                'write_count': 0,
-                'anomalies_detected': 0,
-                'total_latency': 0.0
-            }
-
-# Global tracer instance
-_tracer: Optional[RuntimeIntrospection] = None
-_tracer_lock = threading.Lock()
-
-def get_tracer() -> RuntimeIntrospection:
-    """Get or create the global tracer instance"""
-    global _tracer
-    with _tracer_lock:
-        if _tracer is None:
-            _tracer = RuntimeIntrospection()
-        return _tracer
-
-def trace_memory_access(address: int, access_type: AccessType, data_size: int):
-    """Decorator to trace memory access operations"""
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            if not get_tracer().enable_tracing:
-                return func(*args, **kwargs)
-                
-            start_time = time.perf_counter()
-            try:
-                result = func(*args, **kwargs)
-                return result
-            finally:
-                end_time = time.perf_counter()
-                get_tracer().log_access(address, access_type, data_size, start_time, end_time)
-        return wrapper
-    return decorator
-
-# Context manager for tracing blocks of code
-class MemoryTraceContext:
-    def __init__(self, address: int, access_type: AccessType, data_size: int):
-        self.address = address
-        self.access_type = access_type
-        self.data_size = data_size
-        self.start_time = None
         
-    def __enter__(self):
-        if get_tracer().enable_tracing:
-            self.start_time = time.perf_counter()
-        return self
+        anomalies_by_type = defaultdict(int)
+        total_severity = 0.0
+        high_severity_count = 0
         
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if get_tracer().enable_tracing and self.start_time:
-            end_time = time.perf_counter()
-            get_tracer().log_access(
-                self.address, self.access_type, self.data_size, 
-                self.start
+        for anomaly in recent_anomalies:
+            anomalies_by_type[anomaly.type] += 1
+            total_severity += anomaly.severity
+            if anomaly.severity >= self.review_threshold:
+                high_severity_count += 1
+        
+        return {
+            'total_anomalies': len(recent_anomalies),
+            'anomalies_by_type': dict(anomalies_by_type),
+            'average_severity': total_severity / len(recent_anomalies),
+            'high_severity_count': high_severity_count
+        }
+
+# Unit tests
+import unittest
+from unittest.mock import Mock, patch, MagicMock
+
+class TestRuntimeIntrospection(unittest.TestCase):
+    def setUp(self):
+        self.mock_anomaly_detector = Mock(spec=AnomalyDetector)
+        self.introspection = RuntimeIntrospection(self.mock_anomaly_detector)
+    
+    def test_initialization(self):
+        self.assertIsInstance(self.introspection.logger, logging.Logger)
+        self.assertEqual(self.introspection.review_threshold, 0.8)
+        self.assertEqual(len(self.introspection.hooks), 0)
+    
+    def test_add_hook(self):
+        mock_hook = Mock()
+        self.introspection.add_hook(mock_hook)
+        self.assertEqual(len(self.introspection.hooks), 1)
+        self.assertIn(mock_hook, self.introspection.hooks)
+    
+    def test_set_review_threshold_valid(self):
+        self.introspection.set_review_threshold(0.5)
+        self.assertEqual(self.introspection.review_threshold, 0.5)
+    
+    def test_set_review_threshold_invalid(self):
+        with self.assertRaises(ValueError):
+            self.introspection.set_review_threshold(1.5)
+        with self.assertRaises(ValueError):
+            self.introspection.set_review_threshold(-0.1)
+    
+    @patch('memory.runtime_introspection.psutil')
+    def test_get_memory_stats(self, mock_psutil):
+        # Setup mocks
+        mock_process = Mock()
+        mock_process.memory_info.return_value = Mock(rss=1024*1024, vms=2048*1024)
+        mock_psutil.Process.return_value = mock_process
+        mock_psutil.virtual_memory.return_value = Mock(percent=45.5)
+        
+        with patch('memory.runtime_introspection.gc') as mock_gc:
+            mock_gc.get_stats.return_value = [
+                {'collections': 100, 'collected': 50, 'uncollectable': 5},
+                {'collections': 200, 'collected': 100, 'uncollectable': 10}
+            ]
+            mock_gc.get_objects.return_value = [None] * 1000
+            
+            stats = self.introspection.get_memory_stats()
+            
+            self.assertIn('timestamp', stats)
+            self.assertEqual(stats['process_memory_rss'], 1024*1024)
+            self.assertEqual(stats['process_memory_vms'], 2048*1024)
+            self.assertEqual(stats['system_memory_percent'], 45.5)
+            self.assertEqual(stats['gc_collections'], 300)
+            self.assertEqual(stats['gc_collected'], 150)
+            self.assertEqual(stats['gc_uncollectable'], 15)
+            self.assertEqual(stats['object_count'], 1000)
+    
+    def test_detect_anomalies_no_anomalies(self):
+        self.mock_anomaly_detector.detect.return_value = []
+        anomalies = self.introspection.detect_anomalies()
+        self.assertEqual(anomalies, [])
+        self.assertEqual(len(self.introspection.anomaly_history), 0)
+    
+    def test_detect_anomalies_with_anomalies(self):
+        mock_anomaly = Mock(spec=AnomalyReport)
+        mock_anomaly.type = "memory_leak"
+        mock_anomaly.severity = 0.9
+        mock_anomaly.timestamp = datetime.now()
+        mock_anomaly.details = "Test anomaly"
+        
+        self.mock_anomaly_detector.detect.return_value = [mock_anomaly]
+        
+        # Add a hook to verify it's called
+        hook_called = Mock()
+        self.introspection.add_hook(hook_called)
+        
+        anomalies = self.introspection.detect_anomalies()
+        
+        self.assertEqual(len(anomalies), 1)
+        self.assertEqual(anomalies[0], mock_anomaly)
+        self.assertEqual(len(self.introspection.anomaly_history), 1)
+        hook_called.assert_called_once_with(mock_anomaly)
+    
+    @patch('memory.runtime_introspection.logging.Logger')
+    def test_handle_anomaly_below_threshold(self, mock_logger):
+        mock_anomaly = Mock(spec=AnomalyReport)
+        mock_anomaly.type = "memory_spike"
+        mock_anomaly.severity = 0.5
+        mock_anomaly.details =
