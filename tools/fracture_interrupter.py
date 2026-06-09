@@ -1,238 +1,140 @@
+import os
 import sys
-import traceback
-import inspect
-import random
-import logging
-import json
 import time
-from typing import Any, Dict, List, Optional, Tuple
+import json
+import logging
+import threading
+from datetime import datetime
+from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
-from enum import Enum
+from contextlib import contextmanager
 
-class Severity(Enum):
-    LOW = 1
-    MEDIUM = 2
-    HIGH = 3
-    CRITICAL = 4
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @dataclass
-class MemoryState:
-    locals: Dict[str, Any]
-    globals: Dict[str, Any]
-    frame_info: Dict[str, Any]
-
-@dataclass
-class ValidatorReaction:
-    validator_name: str
-    triggered: bool
-    message: str
-    severity: Severity
-
-@dataclass
-class FractureLog:
-    timestamp: float
-    fracture_type: str
-    stack_trace: List[Dict[str, Any]]
-    memory_state: MemoryState
-    validator_reactions: List[ValidatorReaction]
-    severity: Severity
-    context: Dict[str, Any]
+class FractureEvent:
+    timestamp: str
+    event_type: str
+    language_mode: str
+    trigger_condition: str
+    pre_state: Dict[str, Any]
+    post_state: Optional[Dict[str, Any]] = None
+    resolution: Optional[str] = None
+    semantic_divergence: Optional[Dict[str, Any]] = None
 
 class FractureInterrupter:
-    def __init__(self, log_file: str = "fracture_log.json"):
-        self.log_file = log_file
-        self.logger = self._setup_logger()
-        self.validators = []
-        self.fracture_points = {
-            "noun_gender_conflict": self._inject_noun_gender_conflict,
-            "verb_aspect_conflict": self._inject_verb_aspect_conflict,
-            "preposition_case_mismatch": self._inject_preposition_case_mismatch
+    def __init__(self, log_dir: str = "/debug/fracture_anatomy/"):
+        self.log_dir = log_dir
+        self.current_language_mode = "python"
+        self.fracture_events = []
+        self.lock = threading.Lock()
+        
+        # Ensure log directory exists
+        os.makedirs(self.log_dir, exist_ok=True)
+        
+    def _get_timestamp(self) -> str:
+        return datetime.utcnow().isoformat() + "Z"
+    
+    def _log_event(self, event: FractureEvent):
+        """Log fracture event to file with timestamp"""
+        filename = f"fracture_trace_{datetime.utcnow().strftime('%Y%m%d')}.log"
+        filepath = os.path.join(self.log_dir, filename)
+        
+        with self.lock:
+            with open(filepath, 'a') as f:
+                f.write(json.dumps(asdict(event)) + '\n')
+    
+    def switch_language_mode(self, new_mode: str):
+        """Switch language processing mode"""
+        old_mode = self.current_language_mode
+        self.current_language_mode = new_mode
+        
+        event = FractureEvent(
+            timestamp=self._get_timestamp(),
+            event_type="language_switch",
+            language_mode=new_mode,
+            trigger_condition=f"mode_change_from_{old_mode}",
+            pre_state={"language_mode": old_mode}
+        )
+        
+        self._log_event(event)
+        logger.info(f"Language mode switched to {new_mode}")
+    
+    @contextmanager
+    def monitor_fracture(self, trigger_condition: str, pre_state: Dict[str, Any]):
+        """Context manager for monitoring runtime fractures"""
+        # Pre-fracture state capture
+        event = FractureEvent(
+            timestamp=self._get_timestamp(),
+            event_type="fracture_initiated",
+            language_mode=self.current_language_mode,
+            trigger_condition=trigger_condition,
+            pre_state=pre_state
+        )
+        
+        self._log_event(event)
+        fracture_id = len(self.fracture_events)
+        self.fracture_events.append(event)
+        
+        try:
+            yield
+        except Exception as e:
+            # Record semantic divergence on exception
+            divergence_data = {
+                "exception_type": type(e).__name__,
+                "exception_message": str(e),
+                "traceback": self._format_traceback(sys.exc_info())
+            }
+            
+            event.event_type = "semantic_divergence"
+            event.semantic_divergence = divergence_data
+            event.timestamp = self._get_timestamp()
+            
+            self._log_event(event)
+            raise
+        else:
+            # Post-fracture resolution
+            event.event_type = "fracture_resolved"
+            event.resolution = "completed_successfully"
+            event.post_state = {"status": "resolved"}
+            event.timestamp = self._get_timestamp()
+            
+            self._log_event(event)
+        finally:
+            if fracture_id < len(self.fracture_events):
+                self.fracture_events[fracture_id] = event
+    
+    def _format_traceback(self, exc_info) -> str:
+        """Format exception traceback for logging"""
+        import traceback
+        return ''.join(traceback.format_exception(*exc_info))
+    
+    def simulate_runtime_fracture(self, condition: str = "test_condition"):
+        """Simulate a runtime fracture for testing purposes"""
+        pre_state = {
+            "language_mode": self.current_language_mode,
+            "execution_context": "testing",
+            "memory_state": "stable"
         }
         
-    def _setup_logger(self) -> logging.Logger:
-        logger = logging.getLogger("FractureInterrupter")
-        logger.setLevel(logging.DEBUG)
-        handler = logging.FileHandler(self.log_file)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        return logger
+        with self.monitor_fracture(condition, pre_state):
+            # Simulate some processing that might cause a fracture
+            time.sleep(0.1)
+            # In a real implementation, this would be actual validation logic
+            pass
 
-    def add_validator(self, validator_func):
-        """Add a validator function to the chain"""
-        self.validators.append(validator_func)
-
-    def _capture_memory_state(self) -> MemoryState:
-        frame = inspect.currentframe().f_back.f_back
-        return MemoryState(
-            locals=dict(frame.f_locals),
-            globals=dict(frame.f_globals),
-            frame_info={
-                "filename": frame.f_code.co_filename,
-                "function": frame.f_code.co_name,
-                "lineno": frame.f_lineno
-            }
-        )
-
-    def _capture_stack_trace(self) -> List[Dict[str, Any]]:
-        stack = traceback.extract_stack()
-        return [
-            {
-                "filename": frame.filename,
-                "lineno": frame.lineno,
-                "function": frame.name,
-                "code": frame.line
-            }
-            for frame in stack[:-2]  # Exclude current and calling frames
-        ]
-
-    def _inject_noun_gender_conflict(self, text: str) -> str:
-        # Simulate Russian noun gender conflict by swapping masculine/feminine references
-        masculine_words = ["стол", "дом", "человек", "отец"]
-        feminine_words = ["ручка", "машина", "мама", "дочь"]
-        
-        words = text.split()
-        for i, word in enumerate(words):
-            if word in masculine_words:
-                words[i] = feminine_words[m masculine_words.index(word) % len(feminine_words)]
-            elif word in feminine_words:
-                words[i] = masculine_words[feminine_words.index(word) % len(masculine_words)]
-        return " ".join(words)
-
-    def _inject_verb_aspect_conflict(self, text: str) -> str:
-        # Simulate Russian verb aspect conflict (perfective vs imperfective)
-        imperfective_verbs = ["читать", "писать", "говорить", "делать"]
-        perfective_verbs = ["прочитать", "написать", "сказать", "сделать"]
-        
-        words = text.split()
-        for i, word in enumerate(words):
-            if word in imperfective_verbs:
-                words[i] = perfective_verbs[imperfective_verbs.index(word) % len(perfective_verbs)]
-            elif word in perfective_verbs:
-                words[i] = imperfective_verbs[perfective_verbs.index(word) % len(imperfective_verbs)]
-        return " ".join(words)
-
-    def _inject_preposition_case_mismatch(self, text: str) -> str:
-        # Simulate preposition-case conflicts in Russian
-        prepositions = ["в", "на", "под", "над"]
-        case_endings = ["ый", "ой", "ий"]  # Adjective endings for different cases
-        
-        words = text.split()
-        for i, word in enumerate(words):
-            if word in prepositions and i < len(words) - 1:
-                next_word = words[i+1]
-                # Introduce case mismatch by changing adjective endings
-                for ending in case_endings:
-                    if next_word.endswith(ending):
-                        new_ending = case_endings[(case_endings.index(ending) + 1) % len(case_endings)]
-                        words[i+1] = next_word[:-2] + new_ending
-                        break
-        return " ".join(words)
-
-    def _execute_validators(self, fractured_text: str) -> List[ValidatorReaction]:
-        reactions = []
-        for validator in self.validators:
-            try:
-                result = validator(fractured_text)
-                reactions.append(ValidatorReaction(
-                    validator_name=validator.__name__,
-                    triggered=result.get("triggered", False),
-                    message=result.get("message", ""),
-                    severity=Severity(result.get("severity", 1))
-                ))
-            except Exception as e:
-                reactions.append(ValidatorReaction(
-                    validator_name=validator.__name__,
-                    triggered=True,
-                    message=f"Validator error: {str(e)}",
-                    severity=Severity.HIGH
-                ))
-        return reactions
-
-    def _calculate_severity(self, validator_reactions: List[ValidatorReaction]) -> Severity:
-        if not validator_reactions:
-            return Severity.LOW
-        return max([r.severity for r in validator_reactions], default=Severity.LOW)
-
-    def _log_fracture(self, fracture_type: str, original_text: str, fractured_text: str, 
-                     validator_reactions: List[ValidatorReaction], context: Dict[str, Any]):
-        log_entry = FractureLog(
-            timestamp=time.time(),
-            fracture_type=fracture_type,
-            stack_trace=self._capture_stack_trace(),
-            memory_state=self._capture_memory_state(),
-            validator_reactions=validator_reactions,
-            severity=self._calculate_severity(validator_reactions),
-            context={
-                "original_text": original_text,
-                "fractured_text": fractured_text,
-                **context
-            }
-        )
-        
-        self.logger.info(json.dumps(asdict(log_entry), default=str, indent=2))
-
-    def fracture_text(self, text: str, fracture_type: Optional[str] = None, 
-                     context: Dict[str, Any] = None) -> str:
-        """
-        Introduce semantic fracture in Russian-English text translation
-        """
-        if context is None:
-            context = {}
-            
-        if fracture_type is None:
-            fracture_type = random.choice(list(self.fracture_points.keys()))
-            
-        if fracture_type not in self.fracture_points:
-            raise ValueError(f"Unknown fracture type: {fracture_type}")
-            
-        # Apply the fracture
-        fractured_text = self.fracture_points[fracture_type](text)
-        
-        # Capture validator reactions
-        validator_reactions = self._execute_validators(fractured_text)
-        
-        # Log the fracture event
-        self._log_fracture(fracture_type, text, fractured_text, validator_reactions, context)
-        
-        return fractured_text
-
-# Global instance
-interrupter = FractureInterrupter()
-
-# Convenience functions
-def fracture_text(text: str, fracture_type: Optional[str] = None, 
-                 context: Dict[str, Any] = None) -> str:
-    return interrupter.fracture_text(text, fracture_type, context)
-
-def add_validator(validator_func):
-    interrupter.add_validator(validator_func)
-
-# Example validators
-def semantic_consistency_validator(text: str) -> Dict[str, Any]:
-    # Simple example validator
-    words = text.split()
-    if len(words) < 3:
-        return {"triggered": False, "message": "Text too short", "severity": 1}
+def main():
+    """Main entry point for fracture interrupter tool"""
+    interrupter = FractureInterrupter()
     
-    # Check for obvious contradictions (simplified)
-    contradictions = [("не", "нет"), ("да", "нет")]
-    for word1, word2 in contradictions:
-        if word1 in words and word2 in words:
-            return {"triggered": True, "message": f"Contradiction found: {word1} & {word2}", "severity": 3}
+    # Demonstrate functionality
+    interrupter.switch_language_mode("javascript")
+    interrupter.simulate_runtime_fracture("initial_validation")
     
-    return {"triggered": False, "message": "No contradictions", "severity": 1}
-
-def grammar_validator(text: str) -> Dict[str, Any]:
-    # Simple grammar validator
-    if not text.strip().endswith(('.', '!', '?')):
-        return {"triggered": True, "message": "Missing sentence ending", "severity": 2}
-    return {"triggered": False, "message": "Grammar OK", "severity": 1}
-
-# Register default validators
-add_validator(semantic_consistency_validator)
-add_validator(grammar_validator)
+    interrupter.switch_language_mode("python")
+    interrupter.simulate_runtime_fracture("secondary_validation")
 
 if __name__ == "__main__":
-    # Example usage
-    test_text = "человек читает книгу в комнате"
+    main()
