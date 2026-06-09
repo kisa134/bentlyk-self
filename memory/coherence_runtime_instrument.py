@@ -1,113 +1,196 @@
 import json
-import logging
-import sys
 import traceback
-from typing import Any, Dict, Optional
-
-from semantic_drift_hooks import activate_hooks, SemanticDriftHook
+import time
+import logging
+from datetime import datetime
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, asdict
+from threading import local
+import sys
 
 # Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+
+@dataclass
+class MemoryState:
+    """Represents a snapshot of memory state"""
+    variables: Dict[str, Any]
+    objects: Dict[str, Any]
+    references: Dict[str, str]
+    timestamps: Dict[str, float]
+
+@dataclass
+class DivergenceEvent:
+    """Represents a divergence event with full context"""
+    timestamp: float
+    timestamp_russian: str
+    timestamp_english: str
+    stack_trace: List[str]
+    memory_state: MemoryState
+    semantic_context: Dict[str, Any]
+    event_type: str
+    thread_id: int
+    process_id: int
 
 class CoherenceRuntimeInstrument:
-    def __init__(self):
-        self.hooks_active = False
-        self.divergence_events = []
+    """Runtime instrument for capturing divergence events with full context"""
+    
+    def __init__(self, output_file: str = "divergence_events.json"):
+        self.output_file = output_file
+        self.divergence_events: List[DivergenceEvent] = []
+        self.local_storage = local()
+        self.enabled = True
         
-    def activate_instrumentation(self):
-        """Activate semantic drift hooks for runtime instrumentation"""
-        if not self.hooks_active:
-            activate_hooks()
-            self.hooks_active = True
-            logger.info("Coherence runtime instrumentation activated")
+    def capture_divergence(self, event_type: str = "generic_divergence", **context) -> None:
+        """Capture a divergence event with full stack trace and memory state"""
+        if not self.enabled:
+            return
             
-    def log_semantic_divergence(self, 
-                              english_context: Any, 
-                              russian_context: Any, 
-                              divergence_type: str,
-                              confidence_score: float,
-                              metadata: Optional[Dict] = None):
-        """Log detailed semantic divergence events with full stack traces"""
-        try:
-            # Capture full stack trace
-            stack_trace = traceback.format_stack()
-            
-            # Create structured divergence context
-            divergence_context = {
-                "event_type": "semantic_divergence",
-                "divergence_type": divergence_type,
-                "confidence_score": confidence_score,
-                "timestamp": self._get_timestamp(),
-                "contexts": {
-                    "english": self._serialize_context(english_context),
-                    "russian": self._serialize_context(russian_context)
-                },
-                "stack_trace": stack_trace,
-                "metadata": metadata or {}
-            }
-            
-            # Log the divergence event
-            logger.warning(f"Semantic divergence detected: {json.dumps(divergence_context, indent=2)}")
-            
-            # Store for later analysis
-            self.divergence_events.append(divergence_context)
-            
-        except Exception as e:
-            logger.error(f"Failed to log semantic divergence: {str(e)}")
-            
-    def _serialize_context(self, context: Any) -> Dict:
-        """Safely serialize context data for logging"""
-        try:
-            if isinstance(context, dict):
-                return {k: str(v)[:1000] for k, v in context.items()}  # Limit size
-            elif hasattr(context, '__dict__'):
-                return {k: str(v)[:1000] for k, v in context.__dict__.items()}
-            else:
-                return {"value": str(context)[:1000]}
-        except Exception:
-            return {"value": "Serialization failed"}
-            
-    def _get_timestamp(self) -> str:
-        """Get current timestamp"""
-        from datetime import datetime
-        return datetime.utcnow().isoformat() + "Z"
+        timestamp = time.time()
+        timestamp_russian = self._format_timestamp_russian(timestamp)
+        timestamp_english = self._format_timestamp_english(timestamp)
         
-    def get_divergence_report(self) -> Dict:
-        """Generate structured report of all divergence events"""
-        return {
-            "total_divergences": len(self.divergence_events),
-            "events": self.divergence_events,
-            "generated_at": self._get_timestamp()
-        }
+        # Capture full stack trace
+        stack_trace = traceback.format_stack()
         
-    def clear_divergence_events(self):
-        """Clear stored divergence events"""
-        self.divergence_events.clear()
-
-# Global instance
-instrument = CoherenceRuntimeInstrument()
-
-# Custom hook implementation for semantic drift detection
-class CoherenceSemanticDriftHook(SemanticDriftHook):
-    def on_divergence_detected(self, 
-                             english_data: Any, 
-                             russian_data: Any, 
-                             divergence_type: str,
-                             confidence: float,
-                             **kwargs):
-        """Handle semantic divergence detection events"""
-        instrument.log_semantic_divergence(
-            english_context=english_data,
-            russian_context=russian_data,
-            divergence_type=divergence_type,
-            confidence_score=confidence,
-            metadata=kwargs
+        # Capture memory state
+        memory_state = self._capture_memory_state()
+        
+        # Create divergence event
+        event = DivergenceEvent(
+            timestamp=timestamp,
+            timestamp_russian=timestamp_russian,
+            timestamp_english=timestamp_english,
+            stack_trace=stack_trace,
+            memory_state=memory_state,
+            semantic_context=context,
+            event_type=event_type,
+            thread_id=self._get_thread_id(),
+            process_id=self._get_process_id()
         )
+        
+        self.divergence_events.append(event)
+        self._log_event(event)
+        self._output_structured_data()
+        
+    def _capture_memory_state(self) -> MemoryState:
+        """Capture current memory state context"""
+        variables = {}
+        objects = {}
+        references = {}
+        timestamps = {}
+        
+        # Capture local variables from calling frame
+        frame = sys._getframe(2)  # Get caller's frame
+        if frame:
+            variables.update(frame.f_locals)
+            
+        # Capture global variables
+        if frame:
+            variables.update(frame.f_globals)
+            
+        # Simplify objects for serialization
+        for key, value in variables.items():
+            try:
+                if hasattr(value, '__dict__'):
+                    objects[key] = str(value.__dict__)
+                else:
+                    objects[key] = str(value)
+                timestamps[key] = time.time()
+            except:
+                objects[key] = "<unserializable>"
+                
+        # Capture reference relationships
+        for key, value in variables.items():
+            try:
+                if hasattr(value, '__dict__'):
+                    for attr_name, attr_value in value.__dict__.items():
+                        references[f"{key}.{attr_name}"] = str(type(attr_value).__name__)
+            except:
+                pass
+                
+        return MemoryState(
+            variables=variables,
+            objects=objects,
+            references=references,
+            timestamps=timestamps
+        )
+    
+    def _format_timestamp_russian(self, timestamp: float) -> str:
+        """Format timestamp in Russian"""
+        dt = datetime.fromtimestamp(timestamp)
+        return dt.strftime("%d.%m.%Y %H:%M:%S")
+    
+    def _format_timestamp_english(self, timestamp: float) -> str:
+        """Format timestamp in English"""
+        dt = datetime.fromtimestamp(timestamp)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    
+    def _get_thread_id(self) -> int:
+        """Get current thread ID"""
+        import threading
+        return threading.get_ident()
+    
+    def _get_process_id(self) -> int:
+        """Get current process ID"""
+        import os
+        return os.getpid()
+    
+    def _log_event(self, event: DivergenceEvent) -> None:
+        """Log the divergence event"""
+        logger.info(f"DIVERGENCE EVENT [{event.timestamp_english}]: {event.event_type}")
+        logger.info(f"Russian timestamp: {event.timestamp_russian}")
+        logger.info(f"Thread ID: {event.thread_id}, Process ID: {event.process_id}")
+        
+    def _output_structured_data(self) -> None:
+        """Output structured data for replay testing"""
+        try:
+            serializable_events = []
+            for event in self.divergence_events:
+                event_dict = asdict(event)
+                # Convert non-serializable objects
+                event_dict['memory_state']['variables'] = {
+                    k: str(v) for k, v in event_dict['memory_state']['variables'].items()
+                }
+                serializable_events.append(event_dict)
+                
+            with open(self.output_file, 'w', encoding='utf-8') as f:
+                json.dump(serializable_events, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to output structured data: {e}")
+    
+    def enable(self) -> None:
+        """Enable the instrument"""
+        self.enabled = True
+    
+    def disable(self) -> None:
+        """Disable the instrument"""
+        self.enabled = False
+    
+    def clear_events(self) -> None:
+        """Clear captured events"""
+        self.divergence_events.clear()
+    
+    def get_events(self) -> List[DivergenceEvent]:
+        """Get captured events"""
+        return self.divergence_events.copy()
 
-# Register the hook
-hook = CoherenceSemanticDriftHook()
+# Global instrument instance
+_runtime_instrument = CoherenceRuntimeInstrument()
+
+def capture_divergence(event_type: str = "generic_divergence", **context) -> None:
+    """Global function to capture divergence events"""
+    _runtime_instrument.capture_divergence(event_type, **context)
+
+def enable_instrument() -> None:
+    """Enable the runtime instrument"""
+    _runtime_instrument.enable()
+
+def disable_instrument() -> None:
+    """Disable the runtime instrument"""
+    _runtime_instrument.disable()
+
+def get_instrument() -> CoherenceRuntimeInstrument:
+    """Get the global instrument instance"""
+    return _runtime_instrument
