@@ -1,163 +1,225 @@
-import difflib
 import json
-from typing import Dict, List, Tuple, Any
+import os
+from datetime import datetime
+from typing import Dict, List, Any, Optional
 from pathlib import Path
-import hashlib
-
 
 class GrowthTracker:
-    """Tracks cognitive and codebase growth by analyzing behavioral log changes."""
-    
     def __init__(self, log_directory: str = "logs"):
         self.log_directory = Path(log_directory)
-        self.categories = {
-            'memory': ['recall', 'remember', 'memory', 'storage', 'context'],
-            'logic': ['logic', 'reasoning', 'decision', 'condition', 'algorithm'],
-            'optimization': ['optimize', 'efficiency', 'performance', 'speed', 'reduce'],
-            'new_features': ['new', 'feature', 'capability', 'function', 'method']
+        self.metrics = {
+            "introspection_intensity": 0.0,
+            "energy_level": 0.0,
+            "vulnerability_score": 0.0,
+            "cognitive_load": 0.0,
+            "emotional_volatility": 0.0
         }
-    
-    def load_logs(self, current_file: str, previous_file: str) -> Tuple[Dict, Dict]:
-        """Load current and previous behavioral logs."""
-        try:
-            with open(current_file, 'r') as f:
-                current_log = json.load(f)
-        except FileNotFoundError:
-            current_log = {}
-            
-        try:
-            with open(previous_file, 'r') as f:
-                previous_log = json.load(f)
-        except FileNotFoundError:
-            previous_log = {}
-            
-        return current_log, previous_log
-    
-    def generate_diff(self, current: Dict, previous: Dict) -> List[str]:
-        """Generate diff between current and previous logs."""
-        current_str = json.dumps(current, indent=2, sort_keys=True)
-        previous_str = json.dumps(previous, indent=2, sort_keys=True)
+        self.trends = {}
+        self.flags = []
         
-        diff = list(difflib.unified_diff(
-            previous_str.splitlines(keepends=True),
-            current_str.splitlines(keepends=True),
-            fromfile='previous',
-            tofile='current'
-        ))
+    def parse_logs(self) -> Dict[str, List[Dict]]:
+        """Parse all available tracer logs"""
+        parsed_logs = {
+            "self_reflection": [],
+            "energy_state": [],
+            "vulnerability": [],
+            "cognitive_load": [],
+            "emotional_state": []
+        }
         
-        return diff
+        # Parse self reflection logs
+        reflection_file = self.log_directory / "self_reflection_tracer.json"
+        if reflection_file.exists():
+            with open(reflection_file, 'r') as f:
+                parsed_logs["self_reflection"] = json.load(f)
+                
+        # Parse energy state logs
+        energy_file = self.log_directory / "energy_state_logger.json"
+        if energy_file.exists():
+            with open(energy_file, 'r') as f:
+                parsed_logs["energy_state"] = json.load(f)
+                
+        # Parse vulnerability logs
+        vuln_file = self.log_directory / "vulnerability_tracer.json"
+        if vuln_file.exists():
+            with open(vuln_file, 'r') as f:
+                parsed_logs["vulnerability"] = json.load(f)
+                
+        # Parse cognitive load logs
+        cognitive_file = self.log_directory / "cognitive_load_tracer.json"
+        if cognitive_file.exists():
+            with open(cognitive_file, 'r') as f:
+                parsed_logs["cognitive_load"] = json.load(f)
+                
+        # Parse emotional state logs
+        emotion_file = self.log_directory / "emotional_state_tracer.json"
+        if emotion_file.exists():
+            with open(emotion_file, 'r') as f:
+                parsed_logs["emotional_state"] = json.load(f)
+                
+        return parsed_logs
     
-    def categorize_changes(self, diff_lines: List[str]) -> Dict[str, List[str]]:
-        """Categorize changes based on keywords."""
-        categorized = {category: [] for category in self.categories}
-        
-        for line in diff_lines:
-            if line.startswith('+') or line.startswith('-'):
-                for category, keywords in self.categories.items():
-                    for keyword in keywords:
-                        if keyword in line.lower():
-                            categorized[category].append(line.strip())
-                            break
-        
-        return categorized
-    
-    def calculate_growth_metrics(self, current: Dict, previous: Dict) -> Dict[str, float]:
-        """Calculate quantitative growth metrics."""
+    def calculate_metrics(self, logs: Dict[str, List[Dict]]) -> Dict[str, float]:
+        """Calculate key growth metrics from parsed logs"""
         metrics = {}
         
-        # Size comparison
-        current_size = len(json.dumps(current))
-        previous_size = len(json.dumps(previous))
-        metrics['size_growth'] = ((current_size - previous_size) / previous_size * 100) if previous_size > 0 else 0
-        
-        # Complexity comparison (simplified)
-        current_keys = len(self._flatten_dict(current))
-        previous_keys = len(self._flatten_dict(previous))
-        metrics['complexity_growth'] = ((current_keys - previous_keys) / previous_keys * 100) if previous_keys > 0 else 0
-        
+        # Introspection intensity from self-reflection logs
+        if logs["self_reflection"]:
+            intensities = [log.get("depth_score", 0) for log in logs["self_reflection"]]
+            metrics["introspection_intensity"] = sum(intensities) / len(intensities)
+        else:
+            metrics["introspection_intensity"] = 0.0
+            
+        # Energy level from energy state logs
+        if logs["energy_state"]:
+            energy_levels = [log.get("level", 0) for log in logs["energy_state"]]
+            metrics["energy_level"] = sum(energy_levels) / len(energy_levels)
+        else:
+            metrics["energy_level"] = 0.0
+            
+        # Vulnerability score from vulnerability logs
+        if logs["vulnerability"]:
+            vuln_scores = [log.get("exposure_level", 0) for log in logs["vulnerability"]]
+            metrics["vulnerability_score"] = sum(vuln_scores) / len(vuln_scores)
+        else:
+            metrics["vulnerability_score"] = 0.0
+            
+        # Cognitive load from cognitive load logs
+        if logs["cognitive_load"]:
+            load_scores = [log.get("load_value", 0) for log in logs["cognitive_load"]]
+            metrics["cognitive_load"] = sum(load_scores) / len(load_scores)
+        else:
+            metrics["cognitive_load"] = 0.0
+            
+        # Emotional volatility from emotional state logs
+        if logs["emotional_state"]:
+            emotions = [log.get("intensity", 0) for log in logs["emotional_state"]]
+            if len(emotions) > 1:
+                volatility = sum(abs(emotions[i] - emotions[i-1]) for i in range(1, len(emotions))) / (len(emotions) - 1)
+                metrics["emotional_volatility"] = volatility
+            else:
+                metrics["emotional_volatility"] = 0.0
+        else:
+            metrics["emotional_volatility"] = 0.0
+            
         return metrics
     
-    def _flatten_dict(self, d: Dict, parent_key: str = '', sep: str = '.') -> Dict[str, Any]:
-        """Flatten nested dictionary for analysis."""
-        items = []
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
-            else:
-                items.append((new_key, v))
-        return dict(items)
+    def identify_trends(self, logs: Dict[str, List[Dict]], metrics: Dict[str, float]) -> Dict[str, str]:
+        """Identify key trends based on recent log patterns"""
+        trends = {}
+        
+        # Trend for introspection
+        if len(logs["self_reflection"]) >= 2:
+            recent = logs["self_reflection"][-5:]  # Last 5 entries
+            depths = [r.get("depth_score", 0) for r in recent]
+            if len(depths) >= 2:
+                if depths[-1] > depths[0]:
+                    trends["introspection"] = "increasing"
+                elif depths[-1] < depths[0]:
+                    trends["introspection"] = "decreasing"
+                else:
+                    trends["introspection"] = "stable"
+                    
+        # Trend for energy
+        if len(logs["energy_state"]) >= 2:
+            recent = logs["energy_state"][-5:]
+            energies = [e.get("level", 0) for e in recent]
+            if len(energies) >= 2:
+                if energies[-1] > energies[0]:
+                    trends["energy"] = "increasing"
+                elif energies[-1] < energies[0]:
+                    trends["energy"] = "decreasing"
+                else:
+                    trends["energy"] = "stable"
+                    
+        # Trend for vulnerability
+        if len(logs["vulnerability"]) >= 2:
+            recent = logs["vulnerability"][-5:]
+            vulns = [v.get("exposure_level", 0) for v in recent]
+            if len(vulns) >= 2:
+                if vulns[-1] > vulns[0]:
+                    trends["vulnerability"] = "increasing"
+                elif vulns[-1] < vulns[0]:
+                    trends["vulnerability"] = "decreasing"
+                else:
+                    trends["vulnerability"] = "stable"
+                    
+        return trends
     
-    def generate_summary_report(self, current_file: str, previous_file: str) -> Dict[str, Any]:
-        """Generate comprehensive growth summary report."""
-        current_log, previous_log = self.load_logs(current_file, previous_file)
-        diff_lines = self.generate_diff(current_log, previous_log)
-        categorized_changes = self.categorize_changes(diff_lines)
-        growth_metrics = self.calculate_growth_metrics(current_log, previous_log)
+    def identify_flags(self, metrics: Dict[str, float], trends: Dict[str, str]) -> List[str]:
+        """Identify potential issues or significant changes"""
+        flags = []
         
-        # Identify significant shifts
-        significant_shifts = []
-        for category, changes in categorized_changes.items():
-            if len(changes) > 3:  # Threshold for significance
-                significant_shifts.append({
-                    'category': category,
-                    'change_count': len(changes),
-                    'sample_changes': changes[:3]
-                })
+        # High cognitive load flag
+        if metrics["cognitive_load"] > 8.0:
+            flags.append("HIGH_COGNITIVE_LOAD")
+            
+        # Low energy flag
+        if metrics["energy_level"] < 3.0:
+            flags.append("LOW_ENERGY")
+            
+        # High vulnerability flag
+        if metrics["vulnerability_score"] > 7.0:
+            flags.append("HIGH_VULNERABILITY")
+            
+        # Emotional instability flag
+        if metrics["emotional_volatility"] > 5.0:
+            flags.append("EMOTIONAL_INSTABILITY")
+            
+        # Rapidly decreasing introspection
+        if trends.get("introspection") == "decreasing":
+            flags.append("DECREASING_INTROSPECTION")
+            
+        return flags
+    
+    def generate_dashboard(self) -> Dict[str, Any]:
+        """Generate structured JSON summary of growth state"""
+        logs = self.parse_logs()
+        self.metrics = self.calculate_metrics(logs)
+        self.trends = self.identify_trends(logs, self.metrics)
+        self.flags = self.identify_flags(self.metrics, self.trends)
         
-        report = {
-            'timestamp': str(Path(current_file).stem),
-            'growth_metrics': growth_metrics,
-            'categorized_changes': categorized_changes,
-            'significant_shifts': significant_shifts,
-            'total_changes': sum(len(changes) for changes in categorized_changes.values())
+        dashboard = {
+            "timestamp": datetime.now().isoformat(),
+            "metrics": self.metrics,
+            "trends": self.trends,
+            "flags": self.flags,
+            "summary": {
+                "overall_health": self._calculate_overall_health(),
+                "growth_indicators": self._get_growth_indicators(),
+                "risk_factors": self._get_risk_factors()
+            }
         }
         
-        return report
+        return dashboard
     
-    def save_report(self, report: Dict[str, Any], output_file: str = None):
-        """Save report to file."""
-        if not output_file:
-            output_file = self.log_directory / f"growth_report_{report['timestamp']}.json"
-        
-        self.log_directory.mkdir(exist_ok=True)
-        with open(output_file, 'w') as f:
-            json.dump(report, f, indent=2)
+    def _calculate_overall_health(self) -> str:
+        """Calculate overall health descriptor"""
+        avg_metric = sum(self.metrics.values()) / len(self.metrics)
+        if avg_metric >= 7.0:
+            return "excellent"
+        elif avg_metric >= 5.0:
+            return "good"
+        elif avg_metric >= 3.0:
+            return "fair"
+        else:
+            return "poor"
     
-    def get_cognitive_shift_insights(self, report: Dict[str, Any]) -> List[str]:
-        """Extract insights about cognitive shifts from the report."""
-        insights = []
-        
-        # Memory improvements
-        if report['growth_metrics'].get('complexity_growth', 0) > 10:
-            insights.append("Significant increase in cognitive complexity, suggesting deeper understanding.")
-        
-        # Logic enhancements
-        logic_changes = len(report['categorized_changes'].get('logic', []))
-        if logic_changes > 5:
-            insights.append(f"Substantial logic refinements detected ({logic_changes} changes).")
-        
-        # Optimization focus
-        opt_changes = len(report['categorized_changes'].get('optimization', []))
-        if opt_changes > 3:
-            insights.append(f"Evidence of optimization focus with {opt_changes} related modifications.")
-        
-        # New capabilities
-        new_features = len(report['categorized_changes'].get('new_features', []))
-        if new_features > 0:
-            insights.append(f"Expansion of capabilities with {new_features} new features identified.")
-        
-        return insights
-
-
-# Example usage
-if __name__ == "__main__":
-    tracker = GrowthTracker()
-    report = tracker.generate_summary_report(
-        "logs/current_behavioral_log.json",
-        "logs/previous_behavioral_log.json"
-    )
-    tracker.save_report(report)
-    insights = tracker.get_cognitive_shift_insights(report)
-    for insight in insights:
-        print(insight)
+    def _get_growth_indicators(self) -> List[str]:
+        """Get positive growth indicators"""
+        indicators = []
+        if self.trends.get("introspection") == "increasing":
+            indicators.append("deepening_self_awareness")
+        if self.trends.get("energy") == "increasing":
+            indicators.append("rising_vitality")
+        if self.metrics["vulnerability_score"] > 5.0 and self.trends.get("vulnerability") == "increasing":
+            indicators.append("authentic_openness")
+        return indicators
+    
+    def _get_risk_factors(self) -> List[str]:
+        """Get current risk factors"""
+        risks = []
+        if "HIGH_COGNITIVE_LOAD" in self.flags:
+            risks.append("mental_exhaustion_risk")
+        if "LOW_ENERGY" in self.flags:
+            risks.append
