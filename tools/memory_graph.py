@@ -1,252 +1,260 @@
-import json
-import time
-import random
-import string
+import bisect
+import hashlib
+import struct
+import threading
 from collections import defaultdict
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Dict, Any, Iterator
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+import time
+
 
 @dataclass
-class TrieNode:
-    children: Dict[str, 'TrieNode'] = field(default_factory=dict)
-    memory_entries: List[Dict[str, Any]] = field(default_factory=list)
-    is_end: bool = False
+class MemoryRecord:
+    timestamp: int
+    address: int
+    size: int
+    data_hash: str
+    metadata: Dict[str, Any]
 
-class TrieMemoryIndex:
-    def __init__(self):
-        self.root = TrieNode()
-        self.memory_data = []
-    
-    def _insert_word(self, node: TrieNode, word: str, index: int, char_index: int = 0):
-        if char_index == len(word):
-            node.is_end = True
-            node.memory_entries.append(self.memory_data[index])
-            return
+
+class BTree:
+    def __init__(self, degree: int = 128):
+        self.degree = degree
+        self.root = BTreeNode(leaf=True)
+        self.lock = threading.RLock()
+
+    def insert(self, key: int, value: Any) -> None:
+        with self.lock:
+            root = self.root
+            if len(root.keys) == (2 * self.degree) - 1:
+                new_root = BTreeNode()
+                new_root.children.append(root)
+                self._split_child(new_root, 0)
+                self._insert_non_full(new_root, key, value)
+                self.root = new_root
+            else:
+                self._insert_non_full(root, key, value)
+
+    def _split_child(self, parent: 'BTreeNode', index: int) -> None:
+        degree = self.degree
+        child = parent.children[index]
+        new_child = BTreeNode(leaf=child.leaf)
         
-        char = word[char_index]
-        if char not in node.children:
-            node.children[char] = TrieNode()
+        parent.keys.insert(index, child.keys[degree - 1])
+        parent.children.insert(index + 1, new_child)
         
-        self._insert_word(node.children[char], word, index, char_index + 1)
-    
-    def add_memory(self, memory: Dict[str, Any]):
-        index = len(self.memory_data)
-        self.memory_data.append(memory)
+        new_child.keys = child.keys[degree:]
+        child.keys = child.keys[:degree - 1]
         
-        # Index by content words
-        content = memory.get('content', '')
-        words = content.lower().split()
-        for word in words:
-            self._insert_word(self.root, word, index)
-    
-    def _search_prefix(self, node: TrieNode, prefix: str, char_index: int = 0) -> Optional[TrieNode]:
-        if char_index == len(prefix):
-            return node
-        
-        char = prefix[char_index]
-        if char not in node.children:
+        if not child.leaf:
+            new_child.children = child.children[degree:]
+            child.children = child.children[:degree]
+
+    def _insert_non_full(self, node: 'BTreeNode', key: int, value: Any) -> None:
+        i = len(node.keys) - 1
+        if node.leaf:
+            node.keys.append(None)
+            node.values.append(None)
+            while i >= 0 and key < node.keys[i]:
+                node.keys[i + 1] = node.keys[i]
+                node.values[i + 1] = node.values[i]
+                i -= 1
+            node.keys[i + 1] = key
+            node.values[i + 1] = value
+        else:
+            while i >= 0 and key < node.keys[i]:
+                i -= 1
+            i += 1
+            if len(node.children[i].keys) == (2 * self.degree) - 1:
+                self._split_child(node, i)
+                if key > node.keys[i]:
+                    i += 1
+            self._insert_non_full(node.children[i], key, value)
+
+    def search(self, key: int) -> Optional[Any]:
+        return self._search(self.root, key)
+
+    def _search(self, node: 'BTreeNode', key: int) -> Optional[Any]:
+        i = 0
+        while i < len(node.keys) and key > node.keys[i]:
+            i += 1
+        if i < len(node.keys) and key == node.keys[i]:
+            return node.values[i]
+        if node.leaf:
             return None
+        return self._search(node.children[i], key)
+
+    def range_search(self, start: int, end: int) -> List[Tuple[int, Any]]:
+        result = []
+        self._range_search(self.root, start, end, result)
+        return result
+
+    def _range_search(self, node: 'BTreeNode', start: int, end: int, result: List[Tuple[int, Any]]) -> None:
+        i = 0
+        while i < len(node.keys) and node.keys[i] < start:
+            i += 1
         
-        return self._search_prefix(node.children[char], prefix, char_index + 1)
-    
-    def search(self, query: str) -> List[Dict[str, Any]]:
-        prefix_node = self._search_prefix(self.root, query.lower())
-        if not prefix_node:
-            return []
+        for j in range(i, len(node.keys)):
+            if node.keys[j] > end:
+                break
+            result.append((node.keys[j], node.values[j]))
+            if not node.leaf:
+                self._range_search(node.children[j], start, end, result)
         
-        results = []
-        self._collect_all_entries(prefix_node, results)
-        return results
-    
-    def _collect_all_entries(self, node: TrieNode, results: List[Dict[str, Any]]):
-        results.extend(node.memory_entries)
-        for child in node.children.values():
-            self._collect_all_entries(child, results)
+        if not node.leaf and i < len(node.children):
+            self._range_search(node.children[i], start, end, result)
+            for j in range(i + 1, len(node.keys)):
+                if node.keys[j - 1] > end:
+                    break
+                self._range_search(node.children[j], start, end, result)
+
+
+class BTreeNode:
+    def __init__(self, leaf: bool = False):
+        self.keys: List[int] = []
+        self.values: List[Any] = []
+        self.children: List['BTreeNode'] = []
+        self.leaf = leaf
+
+
+class HashTable:
+    def __init__(self):
+        self.table: Dict[int, MemoryRecord] = {}
+        self.lock = threading.RLock()
+
+    def insert(self, key: int, value: MemoryRecord) -> None:
+        with self.lock:
+            self.table[key] = value
+
+    def get(self, key: int) -> Optional[MemoryRecord]:
+        return self.table.get(key)
+
+    def delete(self, key: int) -> bool:
+        with self.lock:
+            if key in self.table:
+                del self.table[key]
+                return True
+            return False
+
 
 class MemoryGraph:
-    def __init__(self):
-        self.memories = []
-        self.index = TrieMemoryIndex()
-        self.id_map = {}
-    
-    def add_memory(self, memory: Dict[str, Any]):
-        memory_id = memory.get('id', len(self.memories))
-        memory['id'] = memory_id
-        self.memories.append(memory)
-        self.id_map[memory_id] = len(self.memories) - 1
-        self.index.add_memory(memory)
-        return memory_id
-    
-    def get_memory(self, memory_id: int) -> Optional[Dict[str, Any]]:
-        index = self.id_map.get(memory_id)
-        if index is not None:
-            return self.memories[index]
-        return None
-    
-    def search_memories(self, query: str) -> List[Dict[str, Any]]:
-        return self.index.search(query)
-    
-    def get_all_memories(self) -> List[Dict[str, Any]]:
-        return self.memories[:]
-    
-    def save_to_file(self, filepath: str):
-        with open(filepath, 'w') as f:
-            json.dump(self.memories, f)
-    
-    def load_from_file(self, filepath: str):
-        with open(filepath, 'r') as f:
-            self.memories = json.load(f)
-            self.id_map = {mem['id']: i for i, mem in enumerate(self.memories)}
-            # Rebuild index
-            self.index = TrieMemoryIndex()
-            for memory in self.memories:
-                self.index.add_memory(memory)
+    def __init__(self, btree_degree: int = 128, cache_size: int = 10000):
+        self.btree = BTree(degree=btree_degree)
+        self.hash_table = HashTable()
+        self.cache = {}
+        self.cache_size = cache_size
+        self.cache_lock = threading.RLock()
+        self.stats = {
+            'insertions': 0,
+            'queries': 0,
+            'cache_hits': 0,
+            'latency_sum': 0.0
+        }
+        self.stats_lock = threading.RLock()
 
-class LegacyMemoryGraph:
-    """Legacy implementation for benchmark comparison"""
-    def __init__(self):
-        self.memories = []
-        self.id_map = {}
-    
-    def add_memory(self, memory: Dict[str, Any]):
-        memory_id = memory.get('id', len(self.memories))
-        memory['id'] = memory_id
-        self.memories.append(memory)
-        self.id_map[memory_id] = len(self.memories) - 1
-        return memory_id
-    
-    def get_memory(self, memory_id: int) -> Optional[Dict[str, Any]]:
-        index = self.id_map.get(memory_id)
-        if index is not None:
-            return self.memories[index]
-        return None
-    
-    def search_memories(self, query: str) -> List[Dict[str, Any]]:
-        query = query.lower()
-        results = []
-        for memory in self.memories:
-            content = memory.get('content', '').lower()
-            if query in content:
-                results.append(memory)
-        return results
-    
-    def get_all_memories(self) -> List[Dict[str, Any]]:
-        return self.memories[:]
-    
-    def save_to_file(self, filepath: str):
-        with open(filepath, 'w') as f:
-            json.dump(self.memories, f)
-    
-    def load_from_file(self, filepath: str):
-        with open(filepath, 'r') as f:
-            self.memories = json.load(f)
-            self.id_map = {mem['id']: i for i, mem in enumerate(self.memories)}
+    def _update_cache(self, key: int, value: MemoryRecord) -> None:
+        with self.cache_lock:
+            if len(self.cache) >= self.cache_size:
+                # Remove oldest entry (simple FIFO)
+                oldest_key = next(iter(self.cache))
+                del self.cache[oldest_key]
+            self.cache[key] = value
 
-def generate_test_data(num_memories: int = 1000) -> List[Dict[str, Any]]:
-    """Generate test data for benchmarking"""
-    memories = []
-    words = ['artificial', 'intelligence', 'memory', 'graph', 'trie', 'index', 'search', 
-             'neural', 'network', 'data', 'structure', 'algorithm', 'optimization', 
-             'performance', 'benchmark', 'system', 'database', 'storage', 'retrieval']
-    
-    for i in range(num_memories):
-        # Generate random content with some common words
-        content_words = random.choices(words, k=random.randint(5, 15))
-        content = ' '.join(content_words)
-        
-        memories.append({
-            'id': i,
-            'content': content,
-            'timestamp': time.time(),
-            'metadata': {
-                'source': f'source_{random.randint(1, 100)}',
-                'tags': random.choices(words, k=random.randint(1, 3))
-            }
-        })
-    
-    return memories
+    def _get_from_cache(self, key: int) -> Optional[MemoryRecord]:
+        with self.cache_lock:
+            if key in self.cache:
+                with self.stats_lock:
+                    self.stats['cache_hits'] += 1
+                return self.cache[key]
+            return None
 
-def benchmark_performance():
-    """Benchmark new vs legacy implementation"""
-    print("Generating test data...")
-    test_data = generate_test_data(1000)
-    
-    # Initialize both implementations
-    legacy_graph = LegacyMemoryGraph()
-    new_graph = MemoryGraph()
-    
-    # Add memories
-    print("Adding memories to both implementations...")
-    start_time = time.time()
-    for memory in test_data:
-        legacy_graph.add_memory(memory)
-    legacy_add_time = time.time() - start_time
-    
-    start_time = time.time()
-    for memory in test_data:
-        new_graph.add_memory(memory)
-    new_add_time = time.time() - start_time
-    
-    # Test search performance
-    print("Testing search performance...")
-    search_queries = ['artificial', 'neural', 'data', 'system', 'nonexistent']
-    
-    # Legacy search benchmark
-    start_time = time.time()
-    for _ in range(100):  # Run 100 searches
-        for query in search_queries:
-            legacy_graph.search_memories(query)
-    legacy_search_time = time.time() - start_time
-    
-    # New search benchmark
-    start_time = time.time()
-    for _ in range(100):  # Run 100 searches
-        for query in search_queries:
-            new_graph.search_memories(query)
-    new_search_time = time.time() - start_time
-    
-    # Results
-    print("\n=== BENCHMARK RESULTS ===")
-    print(f"Memories added: {len(test_data)}")
-    print(f"Search queries tested: {len(search_queries)} (100 iterations each)")
-    print()
-    print("ADD PERFORMANCE:")
-    print(f"  Legacy: {legacy_add_time:.4f}s")
-    print(f"  New:    {new_add_time:.4f}s")
-    print(f"  Speedup: {legacy_add_time/new_add_time:.2f}x")
-    print()
-    print("SEARCH PERFORMANCE:")
-    print(f"  Legacy: {legacy_search_time:.4f}s")
-    print(f"  New:    {new_search_time:.4f}s")
-    print(f"  Speedup: {legacy_search_time/new_search_time:.2f}x")
-    print()
-    
-    if new_search_time < legacy_search_time * 0.7:
-        print("✓ 30%+ search performance improvement achieved!")
-    else:
-        print("✗ 30%+ search performance improvement not achieved")
-    
-    return legacy_search_time, new_search_time
+    def insert_record(self, record: MemoryRecord) -> None:
+        start_time = time.perf_counter()
+        try:
+            # Insert into both structures
+            self.btree.insert(record.timestamp, record)
+            self.hash_table.insert(record.address, record)
+            self._update_cache(record.address, record)
+            
+            with self.stats_lock:
+                self.stats['insertions'] += 1
+        finally:
+            latency = time.perf_counter() - start_time
+            with self.stats_lock:
+                self.stats['latency_sum'] += latency
 
-if __name__ == "__main__":
-    # Run benchmark
-    benchmark_performance()
-    
-    # Example usage
-    print("\n=== EXAMPLE USAGE ===")
-    graph = MemoryGraph()
-    
-    # Add some sample memories
-    memories = [
-        {"content": "Artificial intelligence is transforming the world"},
-        {"content": "Neural networks form the backbone of deep learning"},
-        {"content": "Memory graphs help organize complex data structures"},
-        {"content": "Trie data structures enable fast prefix searches"}
-    ]
-    
-    for memory in memories:
-        graph.add_memory(memory)
-    
-    # Search examples
-    print("Searching for 'neural':")
-    results
+    def get_by_address(self, address: int) -> Optional[MemoryRecord]:
+        start_time = time.perf_counter()
+        try:
+            # Check cache first
+            cached = self._get_from_cache(address)
+            if cached is not None:
+                return cached
+            
+            # Check hash table
+            result = self.hash_table.get(address)
+            if result is not None:
+                self._update_cache(address, result)
+                return result
+            
+            with self.stats_lock:
+                self.stats['queries'] += 1
+            return None
+        finally:
+            latency = time.perf_counter() - start_time
+            with self.stats_lock:
+                self.stats['latency_sum'] += latency
+
+    def get_by_timestamp(self, timestamp: int) -> Optional[MemoryRecord]:
+        start_time = time.perf_counter()
+        try:
+            result = self.btree.search(timestamp)
+            with self.stats_lock:
+                self.stats['queries'] += 1
+            return result
+        finally:
+            latency = time.perf_counter() - start_time
+            with self.stats_lock:
+                self.stats['latency_sum'] += latency
+
+    def get_range(self, start_timestamp: int, end_timestamp: int) -> List[MemoryRecord]:
+        start_time = time.perf_counter()
+        try:
+            # Get timestamp range from B-tree
+            timestamp_results = self.btree.range_search(start_timestamp, end_timestamp)
+            results = [record for _, record in timestamp_results]
+            
+            with self.stats_lock:
+                self.stats['queries'] += 1
+            return results
+        finally:
+            latency = time.perf_counter() - start_time
+            with self.stats_lock:
+                self.stats['latency_sum'] += latency
+
+    def delete_record(self, address: int) -> bool:
+        start_time = time.perf_counter()
+        try:
+            # Remove from hash table (main deletion point)
+            result = self.hash_table.delete(address)
+            
+            # Remove from cache if present
+            with self.cache_lock:
+                if address in self.cache:
+                    del self.cache[address]
+            
+            return result
+        finally:
+            latency = time.perf_counter() - start_time
+            with self.stats_lock:
+                self.stats['latency_sum'] += latency
+
+    def bulk_insert(self, records: List[MemoryRecord]) -> None:
+        # Parallel insertion for better performance
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(self.insert_record, record) for record in records]
+            for future in futures:
+                future.result()  # Ensure completion
+
+    def get_statistics(self) ->
