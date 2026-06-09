@@ -1,91 +1,172 @@
 import sys
 import os
-import traceback
 import json
-from typing import Dict, List, Any, Optional
+from datetime import datetime
 
-# Add parent directory to path to import coherence_runtime_instrument
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add the parent directory to sys.path to import coherence_runtime_instrument
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from memory.coherence_runtime_instrument import log_fracture
 
-try:
-    from coherence_runtime_instrument import CoherenceRuntime, SemanticFractureException
-except ImportError:
-    print("Error: Could not import coherence_runtime_instrument module")
-    sys.exit(1)
-
-class ForcedFractureTest:
-    def __init__(self):
-        self.runtime = CoherenceRuntime()
-        self.diagnostic_data = {}
-        
-    def execute_ambiguous_russian_sentence(self, russian_text: str) -> Optional[str]:
-        """
-        Execute a Russian sentence with deliberate ambiguity and capture any semantic fracture.
-        Returns the English interpretation if successful, None if fractured.
-        """
-        try:
-            english_output = self.runtime.process_russian_input(russian_text)
-            return english_output
-        except SemanticFractureException as e:
-            self.capture_fracture_diagnostics(russian_text, e)
-            return None
-        except Exception as e:
-            print(f"Unexpected error during processing: {e}")
-            traceback.print_exc()
-            return None
-            
-    def capture_fracture_diagnostics(self, russian_input: str, fracture_exception: SemanticFractureException):
-        """Capture comprehensive diagnostics when semantic fracture occurs."""
-        self.diagnostic_data = {
-            "original_russian_input": russian_input,
-            "failed_english_interpretation": getattr(fracture_exception, 'partial_translation', ''),
-            "point_of_divergence": {
-                "token_index": getattr(fracture_exception, 'fracture_token_index', -1),
-                "token_value": getattr(fracture_exception, 'fracture_token', ''),
-                "semantic_context": getattr(fracture_exception, 'fracture_context', '')
-            },
-            "semantic_weights_at_fracture": getattr(fracture_exception, 'semantic_weights', {}),
-            "full_divergence_stack_trace": traceback.format_exc(),
-            "fracture_reason": str(fracture_exception)
-        }
-        
-    def output_diagnostic_data(self):
-        """Output structured diagnostic data in JSON format."""
-        if self.diagnostic_data:
-            print(json.dumps(self.diagnostic_data, indent=2, ensure_ascii=False))
-        else:
-            print("No fracture diagnostics captured.")
-
-def main():
-    # Create test harness instance
-    test_harness = ForcedFractureTest()
+def generate_semantic_mismatch():
+    """
+    Deliberately generate semantic mismatches between Russian and English
+    processing paths to test fracture detection capabilities.
+    """
+    # Simulate Russian processing path
+    russian_context = {
+        "user_intent": "заказать пиццу",
+        "entities": ["пицца", "доставка", "семья"],
+        "sentiment": "positive",
+        "formality": "casual"
+    }
     
-    # Example Russian sentences with deliberate ambiguity
-    ambiguous_sentences = [
-        # Homonym example: "банк" can mean "bank" (financial institution) or "bench"
-        "Он сидел на банке у реки, думая о финансах.",
-        
-        # Syntactic ambiguity example with case parsing
-        "Я видел человека с telescope на горе.",
-        
-        # Another homonym example: "ключ" can mean "key" or "spring" (water source)  
-        "Она нашла ключ в лесу и открыла тайну."
-    ]
+    # Simulate English processing path with semantic mismatches
+    english_context = {
+        "user_intent": "cancel appointment",  # Mismatch: different intent
+        "entities": ["meeting", "work", "urgent"],  # Mismatch: different entities
+        "sentiment": "negative",  # Mismatch: opposite sentiment
+        "formality": "formal"  # Mismatch: different formality level
+    }
     
-    for i, sentence in enumerate(ambiguous_sentences, 1):
-        print(f"\n=== Test Case {i} ===")
-        print(f"Russian input: {sentence}")
-        
-        result = test_harness.execute_ambiguous_russian_sentence(sentence)
-        
-        if result is None:
-            print("SEMANTIC FRACTURE DETECTED")
-            test_harness.output_diagnostic_data()
-        else:
-            print(f"Successful translation: {result}")
-            
-        # Reset diagnostics for next test
-        test_harness.diagnostic_data = {}
+    # Log the semantic fracture
+    fracture_data = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "fracture_type": "semantic_mismatch",
+        "russian_path": russian_context,
+        "english_path": english_context,
+        "description": "Deliberate semantic mismatch between Russian and English processing paths"
+    }
+    
+    log_fracture(fracture_data)
+    return fracture_data
+
+def generate_contextual_incoherence():
+    """
+    Create contextual incoherence between language paths.
+    """
+    # Russian context: family dinner planning
+    russian_context = {
+        "topic": "семейный ужин",
+        "participants": ["мама", "папа", "дети"],
+        "location": "дома",
+        "timeframe": "вечер"
+    }
+    
+    # English context: business meeting scheduling (incoherent with family dinner)
+    english_context = {
+        "topic": "quarterly business review",
+        "participants": ["executives", "stakeholders", "investors"],
+        "location": "conference room",
+        "timeframe": "morning"
+    }
+    
+    # Log the contextual incoherence fracture
+    fracture_data = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "fracture_type": "contextual_incoherence",
+        "russian_path": russian_context,
+        "english_path": english_context,
+        "description": "Contextual incoherence between family dinner (Russian) and business meeting (English)"
+    }
+    
+    log_fracture(fracture_data)
+    return fracture_data
+
+def generate_temporal_discrepancy():
+    """
+    Generate temporal discrepancies between language processing paths.
+    """
+    # Russian context: past event discussion
+    russian_context = {
+        "event": "поездка на дачу",
+        "time_reference": "в прошлые выходные",
+        "tense": "past"
+    }
+    
+    # English context: future event planning (temporal mismatch)
+    english_context = {
+        "event": "vacation planning",
+        "time_reference": "next summer",
+        "tense": "future"
+    }
+    
+    # Log the temporal discrepancy fracture
+    fracture_data = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "fracture_type": "temporal_discrepancy",
+        "russian_path": russian_context,
+        "english_path": english_context,
+        "description": "Temporal discrepancy between past event discussion (Russian) and future planning (English)"
+    }
+    
+    log_fracture(fracture_data)
+    return fracture_data
+
+def generate_cultural_misalignment():
+    """
+    Create cultural misalignment between Russian and English processing.
+    """
+    # Russian context: traditional Russian hospitality
+    russian_context = {
+        "social_norm": "гостеприимство",
+        "expected_behavior": "настаивать на повторном чаепитии",
+        "cultural_context": "приглашение друзей"
+    }
+    
+    # English context: Western business etiquette (culturally misaligned)
+    english_context = {
+        "social_norm": "professional boundaries",
+        "expected_behavior": "schedule follow-up meeting",
+        "cultural_context": "business networking"
+    }
+    
+    # Log the cultural misalignment fracture
+    fracture_data = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "fracture_type": "cultural_misalignment",
+        "russian_path": russian_context,
+        "english_path": english_context,
+        "description": "Cultural misalignment between Russian hospitality and Western business etiquette"
+    }
+    
+    log_fracture(fracture_data)
+    return fracture_data
+
+def run_forced_fracture_tests():
+    """
+    Execute all forced fracture tests and return results.
+    """
+    test_results = []
+    
+    # Run semantic mismatch test
+    semantic_result = generate_semantic_mismatch()
+    test_results.append(semantic_result)
+    
+    # Run contextual incoherence test
+    contextual_result = generate_contextual_incoherence()
+    test_results.append(contextual_result)
+    
+    # Run temporal discrepancy test
+    temporal_result = generate_temporal_discrepancy()
+    test_results.append(temporal_result)
+    
+    # Run cultural misalignment test
+    cultural_result = generate_cultural_misalignment()
+    test_results.append(cultural_result)
+    
+    return test_results
 
 if __name__ == "__main__":
-    main()
+    # Ensure fracture log directory exists
+    log_dir = os.path.join(os.path.dirname(__file__), '..', '.fracture_log')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Run all forced fracture tests
+    results = run_forced_fracture_tests()
+    
+    # Print summary of generated fractures
+    print(f"Generated {len(results)} deliberate fractures:")
+    for i, result in enumerate(results, 1):
+        print(f"  {i}. {result['fracture_type']}: {result['description']}")
+    
+    print(f"\nFractures logged to: {log_dir}")
