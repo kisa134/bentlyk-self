@@ -1,282 +1,252 @@
 import json
-import hashlib
-from typing import Dict, List, Set, Optional, Any, Tuple
-from collections import defaultdict, deque
-import asyncio
-from dataclasses import dataclass, asdict
-from datetime import datetime
+import time
+import random
+import string
+from collections import defaultdict
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass, field
 
 @dataclass
-class MemoryNode:
-    """Represents a single memory item in the graph"""
-    id: str
-    content: str
-    metadata: Dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
-    tags: List[str]
-    embedding: Optional[List[float]] = None
-    
-    def __post_init__(self):
-        if isinstance(self.created_at, str):
-            self.created_at = datetime.fromisoformat(self.created_at)
-        if isinstance(self.updated_at, str):
-            self.updated_at = datetime.fromisoformat(self.updated_at)
+class TrieNode:
+    children: Dict[str, 'TrieNode'] = field(default_factory=dict)
+    memory_entries: List[Dict[str, Any]] = field(default_factory=list)
+    is_end: bool = False
 
-class MemoryGraph:
-    """
-    A graph-based memory structure that supports efficient search,
-    relationship linking, and automatic connection updates.
-    """
-    
+class TrieMemoryIndex:
     def __init__(self):
-        # Core graph structures
-        self.nodes: Dict[str, MemoryNode] = {}
-        self.edges: Dict[str, Set[str]] = defaultdict(set)
-        self.reverse_edges: Dict[str, Set[str]] = defaultdict(set)
-        self.tag_index: Dict[str, Set[str]] = defaultdict(set)
-        self.content_index: Dict[str, Set[str]] = defaultdict(set)
-        
-        # Content-based indexing for fast search
-        self._build_indexes()
+        self.root = TrieNode()
+        self.memory_data = []
     
-    def _build_indexes(self):
-        """Build initial indexes from existing nodes"""
-        for node_id, node in self.nodes.items():
-            # Index by tags
-            for tag in node.tags:
-                self.tag_index[tag].add(node_id)
-            
-            # Index by content words
-            words = set(node.content.lower().split())
-            for word in words:
-                self.content_index[word].add(node_id)
+    def _insert_word(self, node: TrieNode, word: str, index: int, char_index: int = 0):
+        if char_index == len(word):
+            node.is_end = True
+            node.memory_entries.append(self.memory_data[index])
+            return
+        
+        char = word[char_index]
+        if char not in node.children:
+            node.children[char] = TrieNode()
+        
+        self._insert_word(node.children[char], word, index, char_index + 1)
     
-    def add_memory(self, content: str, metadata: Dict[str, Any] = None, 
-                   tags: List[str] = None, embedding: List[float] = None) -> str:
-        """
-        Add a new memory to the graph and automatically create connections
+    def add_memory(self, memory: Dict[str, Any]):
+        index = len(self.memory_data)
+        self.memory_data.append(memory)
         
-        Args:
-            content: The memory content
-            metadata: Additional metadata
-            tags: List of tags for categorization
-            embedding: Vector embedding for semantic search
-            
-        Returns:
-            str: The ID of the newly created memory
-        """
-        # Generate unique ID based on content
-        memory_id = self._generate_id(content)
-        
-        # Create the memory node
-        node = MemoryNode(
-            id=memory_id,
-            content=content,
-            metadata=metadata or {},
-            created_at=datetime.now(),
-            updated_at=datetime.now(),
-            tags=tags or [],
-            embedding=embedding
-        )
-        
-        # Add to graph
-        self.nodes[memory_id] = node
-        
-        # Update indexes
-        self._update_indexes(node)
-        
-        # Automatically create connections
-        self._create_automatic_connections(node)
-        
-        return memory_id
-    
-    def _generate_id(self, content: str) -> str:
-        """Generate a unique ID for a memory based on its content"""
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
-    
-    def _update_indexes(self, node: MemoryNode):
-        """Update all indexes with the new node"""
-        # Update tag index
-        for tag in node.tags:
-            self.tag_index[tag].add(node.id)
-        
-        # Update content index
-        words = set(node.content.lower().split())
+        # Index by content words
+        content = memory.get('content', '')
+        words = content.lower().split()
         for word in words:
-            self.content_index[word].add(node.id)
+            self._insert_word(self.root, word, index)
     
-    def _create_automatic_connections(self, node: MemoryNode):
-        """Automatically create connections based on content similarity and tags"""
-        # Find related nodes based on shared tags
-        related_by_tags = set()
-        for tag in node.tags:
-            related_by_tags.update(self.tag_index[tag])
+    def _search_prefix(self, node: TrieNode, prefix: str, char_index: int = 0) -> Optional[TrieNode]:
+        if char_index == len(prefix):
+            return node
         
-        # Find related nodes based on content overlap
-        related_by_content = set()
-        words = set(node.content.lower().split())
-        for word in words:
-            related_by_content.update(self.content_index[word])
+        char = prefix[char_index]
+        if char not in node.children:
+            return None
         
-        # Create connections (excluding self)
-        related_nodes = (related_by_tags | related_by_content) - {node.id}
-        
-        for related_id in related_nodes:
-            self._create_bidirectional_edge(node.id, related_id)
+        return self._search_prefix(node.children[char], prefix, char_index + 1)
     
-    def _create_bidirectional_edge(self, node1_id: str, node2_id: str):
-        """Create a bidirectional connection between two nodes"""
-        self.edges[node1_id].add(node2_id)
-        self.reverse_edges[node2_id].add(node1_id)
-        self.edges[node2_id].add(node1_id)
-        self.reverse_edges[node1_id].add(node2_id)
-    
-    def get_memory(self, memory_id: str) -> Optional[MemoryNode]:
-        """Retrieve a memory by its ID"""
-        return self.nodes.get(memory_id)
-    
-    def update_memory(self, memory_id: str, content: str = None, 
-                     metadata: Dict[str, Any] = None, tags: List[str] = None) -> bool:
-        """
-        Update an existing memory and refresh its connections
-        
-        Args:
-            memory_id: ID of the memory to update
-            content: New content (optional)
-            metadata: New metadata (optional)
-            tags: New tags (optional)
-            
-        Returns:
-            bool: True if update was successful
-        """
-        if memory_id not in self.nodes:
-            return False
-        
-        node = self.nodes[memory_id]
-        
-        # Update content if provided
-        if content is not None:
-            node.content = content
-        
-        # Update metadata if provided
-        if metadata is not None:
-            node.metadata.update(metadata)
-        
-        # Update tags if provided
-        if tags is not None:
-            # Remove from old tag index
-            for tag in node.tags:
-                self.tag_index[tag].discard(memory_id)
-            
-            # Update tags
-            node.tags = tags
-            
-            # Add to new tag index
-            for tag in node.tags:
-                self.tag_index[tag].add(memory_id)
-        
-        # Update timestamp
-        node.updated_at = datetime.now()
-        
-        # Rebuild connections
-        self._rebuild_connections(node)
-        
-        return True
-    
-    def _rebuild_connections(self, node: MemoryNode):
-        """Rebuild connections for a node after update"""
-        # Remove existing connections
-        for connected_id in list(self.edges[node.id]):
-            self.edges[connected_id].discard(node.id)
-            self.reverse_edges[connected_id].discard(node.id)
-        
-        self.edges[node.id].clear()
-        self.reverse_edges[node.id].clear()
-        
-        # Recreate connections
-        self._create_automatic_connections(node)
-    
-    def delete_memory(self, memory_id: str) -> bool:
-        """Delete a memory and all its connections"""
-        if memory_id not in self.nodes:
-            return False
-        
-        # Remove connections
-        for connected_id in list(self.edges[memory_id]):
-            self.edges[connected_id].discard(memory_id)
-            self.reverse_edges[connected_id].discard(memory_id)
-        
-        # Remove from indexes
-        node = self.nodes[memory_id]
-        for tag in node.tags:
-            self.tag_index[tag].discard(memory_id)
-        
-        words = set(node.content.lower().split())
-        for word in words:
-            self.content_index[word].discard(memory_id)
-        
-        # Remove node
-        del self.edges[memory_id]
-        del self.reverse_edges[memory_id]
-        del self.nodes[memory_id]
-        
-        return True
-    
-    def search_by_content(self, query: str, limit: int = 10) -> List[MemoryNode]:
-        """Search memories by content keywords"""
-        query_words = set(query.lower().split())
-        matching_nodes = set()
-        
-        for word in query_words:
-            matching_nodes.update(self.content_index.get(word, set()))
-        
-        # Rank by relevance (number of matching words)
-        ranked_nodes = []
-        for node_id in matching_nodes:
-            node = self.nodes[node_id]
-            node_words = set(node.content.lower().split())
-            relevance = len(query_words & node_words)
-            ranked_nodes.append((relevance, node))
-        
-        # Sort by relevance and return top results
-        ranked_nodes.sort(key=lambda x: x[0], reverse=True)
-        return [node for _, node in ranked_nodes[:limit]]
-    
-    def search_by_tags(self, tags: List[str], limit: int = 10) -> List[MemoryNode]:
-        """Search memories by tags"""
-        matching_nodes = set()
-        for tag in tags:
-            matching_nodes.update(self.tag_index.get(tag, set()))
-        
-        # Return top results
-        return [self.nodes[node_id] for node_id in list(matching_nodes)[:limit]]
-    
-    def get_related_memories(self, memory_id: str, depth: int = 2) -> List[MemoryNode]:
-        """
-        Get memories related to a given memory within a certain depth
-        
-        Args:
-            memory_id: ID of the starting memory
-            depth: Maximum depth of relationship traversal
-            
-        Returns:
-            List[MemoryNode]: Related memories
-        """
-        if memory_id not in self.nodes:
+    def search(self, query: str) -> List[Dict[str, Any]]:
+        prefix_node = self._search_prefix(self.root, query.lower())
+        if not prefix_node:
             return []
         
-        visited = set()
-        queue = deque([(memory_id, 0)])  # (node_id, depth)
-        related_ids = set()
+        results = []
+        self._collect_all_entries(prefix_node, results)
+        return results
+    
+    def _collect_all_entries(self, node: TrieNode, results: List[Dict[str, Any]]):
+        results.extend(node.memory_entries)
+        for child in node.children.values():
+            self._collect_all_entries(child, results)
+
+class MemoryGraph:
+    def __init__(self):
+        self.memories = []
+        self.index = TrieMemoryIndex()
+        self.id_map = {}
+    
+    def add_memory(self, memory: Dict[str, Any]):
+        memory_id = memory.get('id', len(self.memories))
+        memory['id'] = memory_id
+        self.memories.append(memory)
+        self.id_map[memory_id] = len(self.memories) - 1
+        self.index.add_memory(memory)
+        return memory_id
+    
+    def get_memory(self, memory_id: int) -> Optional[Dict[str, Any]]:
+        index = self.id_map.get(memory_id)
+        if index is not None:
+            return self.memories[index]
+        return None
+    
+    def search_memories(self, query: str) -> List[Dict[str, Any]]:
+        return self.index.search(query)
+    
+    def get_all_memories(self) -> List[Dict[str, Any]]:
+        return self.memories[:]
+    
+    def save_to_file(self, filepath: str):
+        with open(filepath, 'w') as f:
+            json.dump(self.memories, f)
+    
+    def load_from_file(self, filepath: str):
+        with open(filepath, 'r') as f:
+            self.memories = json.load(f)
+            self.id_map = {mem['id']: i for i, mem in enumerate(self.memories)}
+            # Rebuild index
+            self.index = TrieMemoryIndex()
+            for memory in self.memories:
+                self.index.add_memory(memory)
+
+class LegacyMemoryGraph:
+    """Legacy implementation for benchmark comparison"""
+    def __init__(self):
+        self.memories = []
+        self.id_map = {}
+    
+    def add_memory(self, memory: Dict[str, Any]):
+        memory_id = memory.get('id', len(self.memories))
+        memory['id'] = memory_id
+        self.memories.append(memory)
+        self.id_map[memory_id] = len(self.memories) - 1
+        return memory_id
+    
+    def get_memory(self, memory_id: int) -> Optional[Dict[str, Any]]:
+        index = self.id_map.get(memory_id)
+        if index is not None:
+            return self.memories[index]
+        return None
+    
+    def search_memories(self, query: str) -> List[Dict[str, Any]]:
+        query = query.lower()
+        results = []
+        for memory in self.memories:
+            content = memory.get('content', '').lower()
+            if query in content:
+                results.append(memory)
+        return results
+    
+    def get_all_memories(self) -> List[Dict[str, Any]]:
+        return self.memories[:]
+    
+    def save_to_file(self, filepath: str):
+        with open(filepath, 'w') as f:
+            json.dump(self.memories, f)
+    
+    def load_from_file(self, filepath: str):
+        with open(filepath, 'r') as f:
+            self.memories = json.load(f)
+            self.id_map = {mem['id']: i for i, mem in enumerate(self.memories)}
+
+def generate_test_data(num_memories: int = 1000) -> List[Dict[str, Any]]:
+    """Generate test data for benchmarking"""
+    memories = []
+    words = ['artificial', 'intelligence', 'memory', 'graph', 'trie', 'index', 'search', 
+             'neural', 'network', 'data', 'structure', 'algorithm', 'optimization', 
+             'performance', 'benchmark', 'system', 'database', 'storage', 'retrieval']
+    
+    for i in range(num_memories):
+        # Generate random content with some common words
+        content_words = random.choices(words, k=random.randint(5, 15))
+        content = ' '.join(content_words)
         
-        while queue:
-            current_id, current_depth = queue.popleft()
-            
-            if current_id in visited:
-                continue
-            
-            visited.add(current_id)
-            
-            if current_depth > 0:  # Don't include the starting node
-                related_ids.add(current_id)
+        memories.append({
+            'id': i,
+            'content': content,
+            'timestamp': time.time(),
+            'metadata': {
+                'source': f'source_{random.randint(1, 100)}',
+                'tags': random.choices(words, k=random.randint(1, 3))
+            }
+        })
+    
+    return memories
+
+def benchmark_performance():
+    """Benchmark new vs legacy implementation"""
+    print("Generating test data...")
+    test_data = generate_test_data(1000)
+    
+    # Initialize both implementations
+    legacy_graph = LegacyMemoryGraph()
+    new_graph = MemoryGraph()
+    
+    # Add memories
+    print("Adding memories to both implementations...")
+    start_time = time.time()
+    for memory in test_data:
+        legacy_graph.add_memory(memory)
+    legacy_add_time = time.time() - start_time
+    
+    start_time = time.time()
+    for memory in test_data:
+        new_graph.add_memory(memory)
+    new_add_time = time.time() - start_time
+    
+    # Test search performance
+    print("Testing search performance...")
+    search_queries = ['artificial', 'neural', 'data', 'system', 'nonexistent']
+    
+    # Legacy search benchmark
+    start_time = time.time()
+    for _ in range(100):  # Run 100 searches
+        for query in search_queries:
+            legacy_graph.search_memories(query)
+    legacy_search_time = time.time() - start_time
+    
+    # New search benchmark
+    start_time = time.time()
+    for _ in range(100):  # Run 100 searches
+        for query in search_queries:
+            new_graph.search_memories(query)
+    new_search_time = time.time() - start_time
+    
+    # Results
+    print("\n=== BENCHMARK RESULTS ===")
+    print(f"Memories added: {len(test_data)}")
+    print(f"Search queries tested: {len(search_queries)} (100 iterations each)")
+    print()
+    print("ADD PERFORMANCE:")
+    print(f"  Legacy: {legacy_add_time:.4f}s")
+    print(f"  New:    {new_add_time:.4f}s")
+    print(f"  Speedup: {legacy_add_time/new_add_time:.2f}x")
+    print()
+    print("SEARCH PERFORMANCE:")
+    print(f"  Legacy: {legacy_search_time:.4f}s")
+    print(f"  New:    {new_search_time:.4f}s")
+    print(f"  Speedup: {legacy_search_time/new_search_time:.2f}x")
+    print()
+    
+    if new_search_time < legacy_search_time * 0.7:
+        print("✓ 30%+ search performance improvement achieved!")
+    else:
+        print("✗ 30%+ search performance improvement not achieved")
+    
+    return legacy_search_time, new_search_time
+
+if __name__ == "__main__":
+    # Run benchmark
+    benchmark_performance()
+    
+    # Example usage
+    print("\n=== EXAMPLE USAGE ===")
+    graph = MemoryGraph()
+    
+    # Add some sample memories
+    memories = [
+        {"content": "Artificial intelligence is transforming the world"},
+        {"content": "Neural networks form the backbone of deep learning"},
+        {"content": "Memory graphs help organize complex data structures"},
+        {"content": "Trie data structures enable fast prefix searches"}
+    ]
+    
+    for memory in memories:
+        graph.add_memory(memory)
+    
+    # Search examples
+    print("Searching for 'neural':")
+    results
