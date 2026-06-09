@@ -1,259 +1,222 @@
-import asyncio
-import time
-from typing import Dict, List, Set, Tuple, Optional, Callable
+import logging
+from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass, field
 from enum import Enum
-import logging
+import json
+from datetime import datetime
 
-from memory.fragmentation_detector import FragmentationDetector
-from telemetry.event_manager import EventManager
-from models.introspection import IntrospectionEntry
-
-
-class CoherenceIssueType(Enum):
-    CONTRADICTION = "contradiction"
-    GAP = "gap"
-    REDUNDANCY = "redundancy"
-
+class CoherenceState(Enum):
+    CONSISTENT = "consistent"
+    INCONSISTENT = "inconsistent"
+    FRAGMENTED = "fragmented"
+    UNKNOWN = "unknown"
 
 @dataclass
-class CoherenceMetrics:
-    contradictions: int = 0
-    gaps: int = 0
-    redundancies: int = 0
-    total_entries: int = 0
-    last_updated: float = field(default_factory=time.time)
-
+class MemoryTransition:
+    timestamp: datetime
+    expected_state: Dict[str, Any]
+    actual_state: Dict[str, Any]
+    discrepancy_score: float = 0.0
+    coherence_state: CoherenceState = CoherenceState.UNKNOWN
 
 @dataclass
-class CoherenceThresholds:
-    max_contradictions: int = 5
-    max_gaps: int = 10
-    max_redundancies: int = 15
-    check_interval_seconds: float = 30.0
-
+class CoherencePattern:
+    pattern_id: str
+    description: str
+    frequency: int = 0
+    last_occurrence: datetime = None
+    transitions: List[MemoryTransition] = field(default_factory=list)
 
 class CoherenceTracker:
-    def __init__(
-        self,
-        fragmentation_detector: FragmentationDetector,
-        event_manager: EventManager,
-        thresholds: Optional[CoherenceThresholds] = None
-    ):
-        self.fragmentation_detector = fragmentation_detector
-        self.event_manager = event_manager
-        self.thresholds = thresholds or CoherenceThresholds()
+    def __init__(self, threshold: float = 0.8):
+        self.threshold = threshold
+        self.transitions: List[MemoryTransition] = []
+        self.patterns: Dict[str, CoherencePattern] = {}
+        self.logger = self._setup_logger()
+        self.fragmentation_alerts: List[str] = []
         
-        self.metrics = CoherenceMetrics()
-        self.running = False
-        self._task: Optional[asyncio.Task] = None
-        
-        # Track seen content for coherence analysis
-        self._content_hash_index: Dict[str, List[IntrospectionEntry]] = {}
-        self._content_semantic_map: Dict[str, Set[str]] = {}
-        
-        self._subscribers: List[Callable[[CoherenceMetrics], None]] = []
-        
-        self.logger = logging.getLogger(__name__)
-
-    def subscribe_to_updates(self, callback: Callable[[CoherenceMetrics], None]):
-        """Subscribe to coherence metric updates"""
-        self._subscribers.append(callback)
-
-    def unsubscribe_from_updates(self, callback: Callable[[CoherenceMetrics], None]):
-        """Unsubscribe from coherence metric updates"""
-        if callback in self._subscribers:
-            self._subscribers.remove(callback)
-
-    async def start_tracking(self):
-        """Start the coherence tracking process"""
-        if self.running:
-            return
+    def _setup_logger(self) -> logging.Logger:
+        logger = logging.getLogger("CoherenceTracker")
+        logger.setLevel(logging.INFO)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+        return logger
+    
+    def compare_states(self, expected: Dict[str, Any], actual: Dict[str, Any]) -> Tuple[float, CoherenceState]:
+        """Compare expected vs actual states and return similarity score and coherence state."""
+        if not expected and not actual:
+            return 1.0, CoherenceState.CONSISTENT
             
-        self.running = True
-        self._task = asyncio.create_task(self._tracking_loop())
-        self.logger.info("Coherence tracking started")
-
-    async def stop_tracking(self):
-        """Stop the coherence tracking process"""
-        self.running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        self.logger.info("Coherence tracking stopped")
-
-    async def _tracking_loop(self):
-        """Main tracking loop that periodically checks coherence"""
-        while self.running:
-            try:
-                await self._analyze_coherence()
-                await asyncio.sleep(self.thresholds.check_interval_seconds)
-            except Exception as e:
-                self.logger.error(f"Error in coherence tracking loop: {e}")
-                await asyncio.sleep(5)  # Brief pause before retry
-
-    async def _analyze_coherence(self):
-        """Analyze current coherence metrics and emit events if needed"""
-        # Get recent introspection entries
-        recent_entries = await self.fragmentation_detector.get_recent_entries()
-        
-        # Update metrics
-        await self._update_metrics(recent_entries)
-        
-        # Check thresholds and emit events
-        await self._check_thresholds()
-        
-        # Notify subscribers
-        for callback in self._subscribers:
-            try:
-                callback(self.metrics)
-            except Exception as e:
-                self.logger.error(f"Error notifying subscriber: {e}")
-
-    async def _update_metrics(self, entries: List[IntrospectionEntry]):
-        """Update coherence metrics based on new entries"""
-        self.metrics.total_entries = len(entries)
-        
-        # Reset issue counts
-        contradictions = 0
-        gaps = 0
-        redundancies = 0
-        
-        # Clear indexes for fresh analysis
-        self._content_hash_index.clear()
-        self._content_semantic_map.clear()
-        
-        # Index entries by content hash
-        for entry in entries:
-            content_hash = self._hash_content(entry.content)
-            if content_hash not in self._content_hash_index:
-                self._content_hash_index[content_hash] = []
-            self._content_hash_index[content_hash].append(entry)
+        if not expected or not actual:
+            return 0.0, CoherenceState.INCONSISTENT
             
-            # Build semantic mapping
-            semantic_key = self._extract_semantic_key(entry)
-            if semantic_key not in self._content_semantic_map:
-                self._content_semantic_map[semantic_key] = set()
-            self._content_semantic_map[semantic_key].add(content_hash)
-        
-        # Detect redundancies (same content hash)
-        for content_hash, entry_list in self._content_hash_index.items():
-            if len(entry_list) > 1:
-                redundancies += len(entry_list) - 1
-        
-        # Detect contradictions (different content for same semantic key)
-        for semantic_key, content_hashes in self._content_semantic_map.items():
-            if len(content_hashes) > 1:
-                contradictions += 1
-        
-        # Detect gaps (missing expected relationships)
-        gaps = await self._detect_gaps(entries)
-        
-        # Update metrics
-        self.metrics.contradictions = contradictions
-        self.metrics.gaps = gaps
-        self.metrics.redundancies = redundancies
-        self.metrics.last_updated = time.time()
-
-    async def _detect_gaps(self, entries: List[IntrospectionEntry]) -> int:
-        """Detect gaps in logical sequences or expected relationships"""
-        gaps = 0
-        
-        # Group entries by context/session
-        context_groups: Dict[str, List[IntrospectionEntry]] = {}
-        for entry in entries:
-            context = getattr(entry, 'context_id', 'default')
-            if context not in context_groups:
-                context_groups[context] = []
-            context_groups[context].append(entry)
-        
-        # Check each context for logical completeness
-        for context_id, context_entries in context_groups.items():
-            gaps += await self._check_context_completeness(context_id, context_entries)
-        
-        return gaps
-
-    async def _check_context_completeness(self, context_id: str, entries: List[IntrospectionEntry]) -> int:
-        """Check if a context has complete logical flow"""
-        # This is a simplified gap detection - in practice, this would use
-        # more sophisticated NLP and logical reasoning
-        
-        if len(entries) < 2:
-            return 0
+        total_keys = set(expected.keys()) | set(actual.keys())
+        if not total_keys:
+            return 1.0, CoherenceState.CONSISTENT
             
-        gaps = 0
-        sorted_entries = sorted(entries, key=lambda x: x.timestamp)
+        matches = 0
+        for key in total_keys:
+            if key in expected and key in actual:
+                if expected[key] == actual[key]:
+                    matches += 1
+                elif isinstance(expected[key], dict) and isinstance(actual[key], dict):
+                    # Recursive comparison for nested dictionaries
+                    sub_score, _ = self.compare_states(expected[key], actual[key])
+                    if sub_score > self.threshold:
+                        matches += 1
+                elif isinstance(expected[key], list) and isinstance(actual[key], list):
+                    # Simple list comparison
+                    if expected[key] == actual[key]:
+                        matches += 1
+                        
+        similarity = matches / len(total_keys) if total_keys else 1.0
         
-        # Check temporal continuity
-        for i in range(1, len(sorted_entries)):
-            time_diff = sorted_entries[i].timestamp - sorted_entries[i-1].timestamp
-            # If there's a large time gap without explicit continuation markers
-            if time_diff > 3600:  # 1 hour threshold
-                gaps += 1
-                
-        return gaps
-
-    def _hash_content(self, content: str) -> str:
-        """Create a normalized hash of content for comparison"""
-        # Simplified content hashing - real implementation would normalize better
-        import hashlib
-        normalized = ' '.join(content.lower().split())
-        return hashlib.md5(normalized.encode()).hexdigest()
-
-    def _extract_semantic_key(self, entry: IntrospectionEntry) -> str:
-        """Extract semantic key for grouping related entries"""
-        # Simplified semantic key extraction
-        content_preview = entry.content[:50].lower()
-        return f"{entry.entry_type}_{content_preview}"
-
-    async def _check_thresholds(self):
-        """Check if any coherence thresholds have been breached"""
-        issues = []
-        
-        if self.metrics.contradictions > self.thresholds.max_contradictions:
-            issues.append(CoherenceIssueType.CONTRADICTION)
+        if similarity >= self.threshold:
+            state = CoherenceState.CONSISTENT
+        elif similarity >= self.threshold * 0.5:
+            state = CoherenceState.FRAGMENTED
+        else:
+            state = CoherenceState.INCONSISTENT
             
-        if self.metrics.gaps > self.thresholds.max_gaps:
-            issues.append(CoherenceIssueType.GAP)
-            
-        if self.metrics.redundancies > self.thresholds.max_redundancies:
-            issues.append(CoherenceIssueType.REDUNDANCY)
+        return similarity, state
+    
+    def track_transition(self, expected: Dict[str, Any], actual: Dict[str, Any]) -> MemoryTransition:
+        """Track a single memory state transition."""
+        timestamp = datetime.now()
+        discrepancy_score, coherence_state = self.compare_states(expected, actual)
         
-        if issues:
-            await self._emit_coherence_alert(issues)
-
-    async def _emit_coherence_alert(self, issue_types: List[CoherenceIssueType]):
-        """Emit telemetry event for coherence issues"""
-        event_data = {
-            "issue_types": [issue.value for issue in issue_types],
-            "metrics": {
-                "contradictions": self.metrics.contradictions,
-                "gaps": self.metrics.gaps,
-                "redundancies": self.metrics.redundancies,
-                "total_entries": self.metrics.total_entries
-            },
-            "thresholds": {
-                "max_contradictions": self.thresholds.max_contradictions,
-                "max_gaps": self.thresholds.max_gaps,
-                "max_redundancies": self.thresholds.max_redundancies
-            }
-        }
-        
-        await self.event_manager.emit_event(
-            event_type="coherence_threshold_breached",
-            data=event_data,
-            severity="warning"
+        transition = MemoryTransition(
+            timestamp=timestamp,
+            expected_state=expected,
+            actual_state=actual,
+            discrepancy_score=discrepancy_score,
+            coherence_state=coherence_state
         )
         
-        self.logger.warning(f"Coherence thresholds breached: {issue_types}")
-
-    def get_current_metrics(self) -> CoherenceMetrics:
-        """Get current coherence metrics"""
-        return self.metrics.copy() if hasattr(self.metrics, 'copy') else self.metrics
-
-    async def trigger_immediate_analysis(self):
-        """Trigger an immediate coherence analysis"""
-        await self._analyze_coherence()
+        self.transitions.append(transition)
+        
+        # Log discrepancy if significant
+        if coherence_state != CoherenceState.CONSISTENT:
+            self._log_discrepancy(transition)
+            
+        # Check for fragmentation patterns
+        self._analyze_fragmentation_patterns(transition)
+        
+        return transition
+    
+    def _log_discrepancy(self, transition: MemoryTransition):
+        """Log memory discrepancy with detailed information."""
+        discrepancy_info = {
+            "timestamp": transition.timestamp.isoformat(),
+            "coherence_state": transition.coherence_state.value,
+            "discrepancy_score": transition.discrepancy_score,
+            "expected_keys": list(transition.expected_state.keys()),
+            "actual_keys": list(transition.actual_state.keys()),
+            "missing_keys": list(set(transition.expected_state.keys()) - set(transition.actual_state.keys())),
+            "extra_keys": list(set(transition.actual_state.keys()) - set(transition.expected_state.keys()))
+        }
+        
+        self.logger.warning(f"Memory discrepancy detected: {json.dumps(discrepancy_info, indent=2)}")
+    
+    def _analyze_fragmentation_patterns(self, transition: MemoryTransition):
+        """Analyze and track patterns of memory fragmentation."""
+        if transition.coherence_state == CoherenceState.FRAGMENTED:
+            # Create pattern identifier based on missing/extra keys
+            missing_keys = set(transition.expected_state.keys()) - set(transition.actual_state.keys())
+            extra_keys = set(transition.actual_state.keys()) - set(transition.expected_state.keys())
+            
+            pattern_id = f"fragmentation_{'_'.join(sorted(missing_keys))}_{'_'.join(sorted(extra_keys))}"
+            
+            if pattern_id not in self.patterns:
+                self.patterns[pattern_id] = CoherencePattern(
+                    pattern_id=pattern_id,
+                    description=f"Fragmentation pattern with missing: {missing_keys}, extra: {extra_keys}"
+                )
+            
+            pattern = self.patterns[pattern_id]
+            pattern.frequency += 1
+            pattern.last_occurrence = transition.timestamp
+            pattern.transitions.append(transition)
+            
+            # Alert if pattern occurs frequently
+            if pattern.frequency >= 3:
+                alert_msg = f"Fragmentation pattern '{pattern_id}' occurred {pattern.frequency} times"
+                if alert_msg not in self.fragmentation_alerts:
+                    self.fragmentation_alerts.append(alert_msg)
+                    self.logger.error(f"Memory fragmentation alert: {alert_msg}")
+    
+    def get_coherence_report(self) -> Dict[str, Any]:
+        """Generate a comprehensive coherence report."""
+        if not self.transitions:
+            return {"status": "no_data", "report": {}}
+            
+        total_transitions = len(self.transitions)
+        consistent_count = sum(1 for t in self.transitions if t.coherence_state == CoherenceState.CONSISTENT)
+        inconsistent_count = sum(1 for t in self.transitions if t.coherence_state == CoherenceState.INCONSISTENT)
+        fragmented_count = sum(1 for t in self.transitions if t.coherence_state == CoherenceState.FRAGMENTED)
+        
+        avg_discrepancy = sum(t.discrepancy_score for t in self.transitions) / total_transitions
+        
+        report = {
+            "summary": {
+                "total_transitions": total_transitions,
+                "consistent": consistent_count,
+                "inconsistent": inconsistent_count,
+                "fragmented": fragmented_count,
+                "consistency_rate": consistent_count / total_transitions if total_transitions > 0 else 0,
+                "avg_discrepancy_score": avg_discrepancy
+            },
+            "fragmentation_patterns": [
+                {
+                    "pattern_id": pattern.pattern_id,
+                    "description": pattern.description,
+                    "frequency": pattern.frequency,
+                    "last_occurrence": pattern.last_occurrence.isoformat() if pattern.last_occurrence else None
+                }
+                for pattern in self.patterns.values()
+            ],
+            "alerts": self.fragmentation_alerts
+        }
+        
+        return report
+    
+    def get_recent_transitions(self, count: int = 10) -> List[MemoryTransition]:
+        """Get the most recent memory transitions."""
+        return self.transitions[-count:] if self.transitions else []
+    
+    def clear_history(self):
+        """Clear transition history and patterns."""
+        self.transitions.clear()
+        self.patterns.clear()
+        self.fragmentation_alerts.clear()
+    
+    def export_coherence_data(self) -> str:
+        """Export coherence tracking data as JSON string."""
+        data = {
+            "transitions": [
+                {
+                    "timestamp": t.timestamp.isoformat(),
+                    "expected_state": t.expected_state,
+                    "actual_state": t.actual_state,
+                    "discrepancy_score": t.discrepancy_score,
+                    "coherence_state": t.coherence_state.value
+                }
+                for t in self.transitions
+            ],
+            "patterns": {
+                pid: {
+                    "pattern_id": p.pattern_id,
+                    "description": p.description,
+                    "frequency": p.frequency,
+                    "last_occurrence": p.last_occurrence.isoformat() if p.last_occurrence else None
+                }
+                for pid, p in self.patterns.items()
+            },
+            "alerts": self.fragmentation_alerts
+        }
+        return json.dumps(data, indent=2)
