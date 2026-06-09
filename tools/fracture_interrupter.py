@@ -1,219 +1,152 @@
 import json
 import logging
-import traceback
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass, asdict
 from datetime import datetime
+from typing import Dict, Any, Tuple
 import sys
+import os
 
-@dataclass
-class DivergenceEvent:
-    """Structured representation of a divergence event"""
-    timestamp: str
-    event_type: str
-    location: str
-    expected_value: Any
-    actual_value: Any
-    stack_trace: List[Dict[str, Any]]
-    context: Dict[str, Any]
-    semantic_mismatch: Optional[str] = None
-    severity: str = "medium"
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tools.multilingual_coherence import MultilingualCoherenceAnalyzer
+from tools.unified_runtime_validator import UnifiedRuntimeValidator
 
 class FractureInterrupter:
-    """Enhanced interrupter for logging detailed divergence events"""
-    
-    def __init__(self, log_file: str = "divergence_events.log"):
-        self.logger = self._setup_logger(log_file)
+    def __init__(self, log_file: str = "fracture_traces.log"):
+        self.coherence_analyzer = MultilingualCoherenceAnalyzer()
+        self.runtime_validator = UnifiedRuntimeValidator()
         
-    def _setup_logger(self, log_file: str) -> logging.Logger:
-        """Setup structured logger for divergence events"""
-        logger = logging.getLogger("FractureInterrupter")
-        logger.setLevel(logging.INFO)
+        # Setup logging
+        self.logger = logging.getLogger("FractureInterrupter")
+        self.logger.setLevel(logging.INFO)
         
-        # Clear existing handlers
-        logger.handlers.clear()
+        # Clear any existing handlers
+        self.logger.handlers.clear()
         
-        # File handler with JSON formatting
-        handler = logging.FileHandler(log_file)
-        handler.setFormatter(logging.Formatter('%(message)s'))
-        logger.addHandler(handler)
+        # File handler for structured logging
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
         
-        # Prevent propagation to root logger
-        logger.propagate = False
+        # Console handler for immediate feedback
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.WARNING)
         
-        return logger
-    
-    def _capture_stack_trace(self) -> List[Dict[str, Any]]:
-        """Capture current stack trace excluding this class methods"""
-        stack_frames = []
-        for frame_info in traceback.extract_stack():
-            # Skip internal fracture interrupter frames
-            if 'fracture_interrupter' not in frame_info.filename:
-                stack_frames.append({
-                    'filename': frame_info.filename,
-                    'lineno': frame_info.lineno,
-                    'function': frame_info.name,
-                    'code': frame_info.line
-                })
-        return stack_frames
-    
-    def _analyze_semantic_mismatch(self, expected: Any, actual: Any) -> Optional[str]:
-        """Analyze semantic differences between values"""
-        if type(expected) != type(actual):
-            return f"Type mismatch: expected {type(expected).__name__}, got {type(actual).__name__}"
+        # Structured formatter
+        formatter = logging.Formatter('%(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
         
-        if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
-            if expected == 0 and actual != 0:
-                return "Zero value expectation violated"
-            elif actual == 0 and expected != 0:
-                return "Unexpected zero value"
-            elif expected != 0:
-                relative_diff = abs((actual - expected) / expected)
-                if relative_diff > 0.1:  # 10% threshold
-                    return f"Significant numerical divergence ({relative_diff:.2%})"
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
         
-        if isinstance(expected, str) and isinstance(actual, str):
-            if expected.lower() != actual.lower():
-                return "Case-sensitive string mismatch"
-            else:
-                return "String content differs with case variations"
+        self.trace_buffer = []
+
+    def detect_fracture_point(self, english_text: str, russian_text: str) -> Tuple[int, str]:
+        """
+        Detect the exact point of semantic divergence between texts.
+        Returns (position, reason) tuple.
+        """
+        eng_words = english_text.split()
+        rus_words = russian_text.split()
         
-        return None
-    
-    def _create_context_snapshot(self) -> Dict[str, Any]:
-        """Create snapshot of relevant execution context"""
-        frame = sys._getframe(2)  # Go back two frames to get caller context
-        context = {
-            'locals': {},
-            'globals': {}
+        min_length = min(len(eng_words), len(rus_words))
+        
+        for i in range(min_length):
+            eng_segment = ' '.join(eng_words[:i+1])
+            rus_segment = ' '.join(rus_words[:i+1])
+            
+            coherence_score = self.coherence_analyzer.analyze_coherence(
+                eng_segment, rus_segment
+            )
+            
+            if coherence_score < 0.7:  # Threshold for semantic fracture
+                return i, f"Coherence score dropped to {coherence_score:.3f}"
+        
+        return -1, "No fracture detected"
+
+    def validate_runtime_response(self, english_text: str, russian_text: str) -> Dict[str, Any]:
+        """Validate the runtime response using unified validator."""
+        return self.runtime_validator.validate(english_text, russian_text)
+
+    def log_validation_trace(self, trace_data: Dict[str, Any]):
+        """Log structured validation trace for analysis."""
+        trace_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "trace_id": len(self.trace_buffer),
+            "fracture_point": trace_data.get("fracture_point", -1),
+            "divergence_reason": trace_data.get("divergence_reason", ""),
+            "coherence_analysis": trace_data.get("coherence_analysis", {}),
+            "runtime_validation": trace_data.get("runtime_validation", {}),
+            "english_segment": trace_data.get("english_segment", ""),
+            "russian_segment": trace_data.get("russian_segment", "")
         }
         
-        # Capture limited local variables (avoid memory issues)
-        for key, value in frame.f_locals.items():
-            if not key.startswith('_') and isinstance(value, (str, int, float, bool, list, dict)):
-                try:
-                    serialized_value = json.dumps(value, default=str)
-                    context['locals'][key] = serialized_value
-                except (TypeError, ValueError):
-                    context['locals'][key] = str(value)
-        
-        # Capture some global context
-        context['globals']['__file__'] = frame.f_globals.get('__file__', 'unknown')
-        context['globals']['__name__'] = frame.f_globals.get('__name__', 'unknown')
-        
-        return context
-    
-    def log_divergence(
-        self,
-        event_type: str,
-        location: str,
-        expected: Any,
-        actual: Any,
-        severity: str = "medium",
-        additional_context: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Log a detailed divergence event"""
-        event = DivergenceEvent(
-            timestamp=datetime.utcnow().isoformat() + 'Z',
-            event_type=event_type,
-            location=location,
-            expected_value=expected,
-            actual_value=actual,
-            stack_trace=self._capture_stack_trace(),
-            context=self._create_context_snapshot(),
-            semantic_mismatch=self._analyze_semantic_mismatch(expected, actual),
-            severity=severity
+        self.trace_buffer.append(trace_entry)
+        self.logger.info(json.dumps(trace_entry))
+
+    def process_fracture(self, english_text: str, russian_text: str):
+        """Process induced semantic fracture and log complete trace."""
+        # 1. Detect exact point of divergence
+        fracture_pos, divergence_reason = self.detect_fracture_point(
+            english_text, russian_text
         )
         
-        # Add any additional context
-        if additional_context:
-            event.context.update(additional_context)
+        # Extract segments up to fracture point
+        eng_words = english_text.split()
+        rus_words = russian_text.split()
         
-        # Log as structured JSON
-        self.logger.info(json.dumps(asdict(event), default=str))
-    
-    def assert_equal(
-        self,
-        expected: Any,
-        actual: Any,
-        location: str = "unknown",
-        message: str = "",
-        severity: str = "high"
-    ) -> bool:
-        """Assert equality and log divergence if assertion fails"""
-        if expected == actual:
-            return True
-            
-        context = {'assertion_message': message} if message else {}
-        self.log_divergence(
-            event_type="ASSERTION_FAILURE",
-            location=location,
-            expected=expected,
-            actual=actual,
-            severity=severity,
-            additional_context=context
+        if fracture_pos >= 0:
+            eng_segment = ' '.join(eng_words[:fracture_pos+1])
+            rus_segment = ' '.join(rus_words[:fracture_pos+1])
+        else:
+            eng_segment = english_text
+            rus_segment = russian_text
+        
+        # 2. Capture semantic mismatch from multilingual_coherence
+        coherence_analysis = self.coherence_analyzer.detailed_analysis(
+            eng_segment, rus_segment
         )
-        return False
+        
+        # 3. Get response from unified_runtime_validator
+        runtime_validation = self.validate_runtime_response(
+            eng_segment, rus_segment
+        )
+        
+        # Structure trace data
+        trace_data = {
+            "fracture_point": fracture_pos,
+            "divergence_reason": divergence_reason,
+            "coherence_analysis": coherence_analysis,
+            "runtime_validation": runtime_validation,
+            "english_segment": eng_segment,
+            "russian_segment": rus_segment
+        }
+        
+        # Log for analysis
+        self.log_validation_trace(trace_data)
+        
+        return trace_data
+
+    def get_trace_buffer(self) -> list:
+        """Return all collected traces."""
+        return self.trace_buffer.copy()
+
+    def clear_traces(self):
+        """Clear trace buffer."""
+        self.trace_buffer.clear()
+
+if __name__ == "__main__":
+    # Example usage
+    interrupter = FractureInterrupter()
     
-    def validate_contract(
-        self,
-        contract_name: str,
-        inputs: Dict[str, Any],
-        outputs: Dict[str, Any],
-        expected_outputs: Dict[str, Any],
-        location: str = "contract_validation"
-    ) -> bool:
-        """Validate contract outputs against expectations"""
-        success = True
-        for key, expected_value in expected_outputs.items():
-            actual_value = outputs.get(key)
-            if expected_value != actual_value:
-                context = {
-                    'contract': contract_name,
-                    'input_parameters': inputs,
-                    'output_key': key
-                }
-                self.log_divergence(
-                    event_type="CONTRACT_VIOLATION",
-                    location=f"{location}.{key}",
-                    expected=expected_value,
-                    actual=actual_value,
-                    severity="high",
-                    additional_context=context
-                )
-                success = False
-        return success
-
-# Global instance for easy access
-interrupter = FractureInterrupter()
-
-def log_divergence_event(
-    event_type: str,
-    location: str,
-    expected: Any,
-    actual: Any,
-    severity: str = "medium",
-    additional_context: Optional[Dict[str, Any]] = None
-) -> None:
-    """Convenience function for logging divergence events"""
-    interrupter.log_divergence(event_type, location, expected, actual, severity, additional_context)
-
-def assert_values_equal(
-    expected: Any,
-    actual: Any,
-    location: str = "unknown",
-    message: str = "",
-    severity: str = "high"
-) -> bool:
-    """Convenience function for asserting equality"""
-    return interrupter.assert_equal(expected, actual, location, message, severity)
-
-def validate_smart_contract(
-    contract_name: str,
-    inputs: Dict[str, Any],
-    outputs: Dict[str, Any],
-    expected_outputs: Dict[str, Any],
-    location: str = "contract_validation"
-) -> bool:
-    """Convenience function for validating smart contracts"""
-    return interrupter.validate_contract(contract_name, inputs, outputs, expected_outputs, location)
+    # Test case - induced semantic fracture
+    english = "The system will process all data inputs and generate reports automatically"
+    russian = "Система обработает все входные данные и автоматически сгенерирует отчеты"
+    
+    # Process and log fracture
+    trace = interrupter.process_fracture(english, russian)
+    
+    print("Fracture Processing Complete")
+    print(f"Trace ID: {len(interrupter.get_trace_buffer()) - 1}")
+    print(f"Fracture Point: {trace['fracture_point']}")
+    print(f"Divergence Reason: {trace['divergence_reason']}")
