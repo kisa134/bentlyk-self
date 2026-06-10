@@ -1,182 +1,190 @@
-import logging
-import time
+import sys
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+import time
 import json
+import hashlib
+from collections import defaultdict
+from functools import wraps
+from contextlib import contextmanager
 
 class FractureInterrupter:
-    def __init__(self, log_file: str = "fracture_trace.log"):
-        self.logger = self._setup_logger(log_file)
-        self.fracture_stack: List[Dict[str, Any]] = []
-        self.divergence_points: List[Dict[str, Any]] = []
-        
-    def _setup_logger(self, log_file: str) -> logging.Logger:
-        logger = logging.getLogger("FractureInterrupter")
-        logger.setLevel(logging.DEBUG)
-        
-        # Clear any existing handlers
-        logger.handlers.clear()
-        
-        # File handler for structured logging
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.DEBUG)
-        
-        # Console handler for immediate feedback
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.WARNING)
-        
-        # Structured formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-        
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-        
-        return logger
-
-    def push_context(self, layer: str, operation: str, data: Any) -> None:
-        """Push processing context onto the stack"""
-        context = {
-            "timestamp": time.time(),
-            "layer": layer,
-            "operation": operation,
-            "data_snapshot": self._serialize_data(data),
-            "stack_depth": len(self.fracture_stack)
+    def __init__(self):
+        self.hooks_enabled = False
+        self.semantic_events = []
+        self.frame_differentials = []
+        self.validation_reports = []
+        self.lock = threading.Lock()
+        self.original_excepthook = sys.excepthook
+        self.tracer_state = {
+            'russian_frames': [],
+            'english_frames': [],
+            'last_divergence': None
         }
-        self.fracture_stack.append(context)
-        self.logger.debug(f"Context pushed: {layer}/{operation}")
 
-    def pop_context(self) -> Optional[Dict[str, Any]]:
-        """Pop processing context from the stack"""
-        if self.fracture_stack:
-            context = self.fracture_stack.pop()
-            self.logger.debug(f"Context popped: {context['layer']}/{context['operation']}")
-            return context
-        return None
+    def enable_hooks(self):
+        if not self.hooks_enabled:
+            sys.excepthook = self._exception_handler
+            sys.settrace(self._trace_handler)
+            self.hooks_enabled = True
 
-    def check_semantic_fracture(self, ru_data: Any, en_data: Any, 
-                              layer: str, operation: str) -> bool:
-        """Check for semantic divergence between Russian and English processing"""
-        divergence = not self._semantic_equivalence(ru_data, en_data)
-        
-        if divergence:
-            divergence_point = {
-                "timestamp": time.time(),
-                "layer": layer,
-                "operation": operation,
-                "ru_data": self._serialize_data(ru_data),
-                "en_data": self._serialize_data(en_data),
-                "stack_trace": self._capture_stack_trace(),
-                "context_stack": self._snapshot_context_stack()
+    def disable_hooks(self):
+        if self.hooks_enabled:
+            sys.excepthook = self.original_excepthook
+            sys.settrace(None)
+            self.hooks_enabled = False
+
+    def _exception_handler(self, exc_type, exc_value, exc_traceback):
+        self._capture_semantic_event(exc_type, exc_value, exc_traceback)
+        self.original_excepthook(exc_type, exc_value, exc_traceback)
+
+    def _trace_handler(self, frame, event, arg):
+        if event == 'call':
+            self._capture_frame_context(frame)
+        return self._trace_handler
+
+    def _capture_frame_context(self, frame):
+        with self.lock:
+            filename = frame.f_code.co_filename
+            function = frame.f_code.co_name
+            lineno = frame.f_lineno
+            
+            # Determine language context from filename or function name
+            is_russian = self._is_russian_context(filename, function)
+            
+            frame_info = {
+                'filename': filename,
+                'function': function,
+                'lineno': lineno,
+                'timestamp': time.time(),
+                'locals': self._sanitize_locals(frame.f_locals),
+                'is_russian': is_russian
             }
             
-            self.divergence_points.append(divergence_point)
-            self._log_fracture(divergence_point)
-            
-        return divergence
-
-    def _semantic_equivalence(self, ru_data: Any, en_data: Any) -> bool:
-        """Determine semantic equivalence between data structures"""
-        # Handle None cases
-        if ru_data is None and en_data is None:
-            return True
-        if ru_data is None or en_data is None:
-            return False
-            
-        # Handle basic types
-        if isinstance(ru_data, (str, int, float, bool)) and isinstance(en_data, (str, int, float, bool)):
-            return ru_data == en_data
-            
-        # Handle lists
-        if isinstance(ru_data, list) and isinstance(en_data, list):
-            if len(ru_data) != len(en_data):
-                return False
-            return all(self._semantic_equivalence(ru_item, en_item) 
-                      for ru_item, en_item in zip(ru_data, en_data))
-                      
-        # Handle dicts
-        if isinstance(ru_data, dict) and isinstance(en_data, dict):
-            if set(ru_data.keys()) != set(en_data.keys()):
-                return False
-            return all(self._semantic_equivalence(ru_data[key], en_data[key]) 
-                      for key in ru_data.keys())
-                      
-        # Handle objects with __dict__
-        if hasattr(ru_data, '__dict__') and hasattr(en_data, '__dict__'):
-            return self._semantic_equivalence(ru_data.__dict__, en_data.__dict__)
-            
-        # Fallback to string comparison for complex objects
-        return str(ru_data) == str(en_data)
-
-    def _serialize_data(self, data: Any) -> Dict[str, Any]:
-        """Serialize data for logging"""
-        try:
-            if isinstance(data, (str, int, float, bool, type(None))):
-                return {"type": type(data).__name__, "value": data}
-            elif isinstance(data, (list, tuple)):
-                return {
-                    "type": type(data).__name__,
-                    "length": len(data),
-                    "sample": [self._serialize_data(item) for item in data[:3]] if data else []
-                }
-            elif isinstance(data, dict):
-                return {
-                    "type": "dict",
-                    "keys": list(data.keys())[:10],  # Limit keys for brevity
-                    "size": len(data)
-                }
+            if is_russian:
+                self.tracer_state['russian_frames'].append(frame_info)
             else:
-                return {
-                    "type": type(data).__name__,
-                    "repr": str(data)[:200]  # Limit string length
-                }
-        except Exception as e:
-            return {"type": "unknown", "error": str(e)}
+                self.tracer_state['english_frames'].append(frame_info)
+            
+            # Check for semantic divergence
+            self._check_semantic_divergence()
 
-    def _capture_stack_trace(self) -> List[str]:
-        """Capture current stack trace"""
-        return traceback.format_stack()[:-1]  # Exclude this method call
+    def _is_russian_context(self, filename, function):
+        # Simple heuristic - could be enhanced with more sophisticated detection
+        russian_indicators = ['ru', 'rus', 'кириллица', ' russian']
+        file_check = any(indicator in filename.lower() for indicator in russian_indicators)
+        func_check = any(indicator in function.lower() for indicator in russian_indicators)
+        return file_check or func_check
 
-    def _snapshot_context_stack(self) -> List[Dict[str, Any]]:
-        """Create a snapshot of the current context stack"""
-        return [ctx.copy() for ctx in self.fracture_stack]
+    def _sanitize_locals(self, locals_dict):
+        # Remove sensitive data and non-serializable objects
+        sanitized = {}
+        for key, value in locals_dict.items():
+            try:
+                json.dumps(value)  # Test serializability
+                sanitized[key] = value
+            except (TypeError, ValueError):
+                sanitized[key] = f"<non-serializable: {type(value).__name__}>"
+        return sanitized
 
-    def _log_fracture(self, divergence_point: Dict[str, Any]) -> None:
-        """Log fracture information in structured format"""
-        log_entry = {
-            "event_type": "semantic_fracture",
-            "timestamp": divergence_point["timestamp"],
-            "location": f"{divergence_point['layer']}.{divergence_point['operation']}",
-            "divergence_details": {
-                "ru_data": divergence_point["ru_data"],
-                "en_data": divergence_point["en_data"]
-            },
-            "stack_context": divergence_point["context_stack"],
-            "full_trace": divergence_point["stack_trace"]
-        }
+    def _check_semantic_divergence(self):
+        # Simple divergence detection - can be enhanced
+        russian_count = len(self.tracer_state['russian_frames'])
+        english_count = len(self.tracer_state['english_frames'])
         
-        self.logger.warning(f"SEMANTIC FRACTURE DETECTED: {json.dumps(log_entry, indent=2)}")
+        if abs(russian_count - english_count) > 5:  # Threshold for divergence
+            if self.tracer_state['last_divergence'] is None or \
+               time.time() - self.tracer_state['last_divergence'] > 1.0:  # Debounce
+                self._record_frame_differential()
+                self.tracer_state['last_divergence'] = time.time()
 
-    def get_fracture_report(self) -> Dict[str, Any]:
-        """Generate a comprehensive fracture report"""
-        return {
-            "total_fractures": len(self.divergence_points),
-            "fractures": self.divergence_points,
-            "current_context_depth": len(self.fracture_stack),
-            "active_context": self.fracture_stack[-1] if self.fracture_stack else None
+    def _record_frame_differential(self):
+        with self.lock:
+            timestamp = time.time()
+            differential = {
+                'timestamp': timestamp,
+                'russian_frame_count': len(self.tracer_state['russian_frames']),
+                'english_frame_count': len(self.tracer_state['english_frames']),
+                'difference': len(self.tracer_state['russian_frames']) - len(self.tracer_state['english_frames']),
+                'russian_frames_snapshot': self.tracer_state['russian_frames'][-10:],  # Last 10
+                'english_frames_snapshot': self.tracer_state['english_frames'][-10:]   # Last 10
+            }
+            self.frame_differentials.append(differential)
+
+    def _capture_semantic_event(self, exc_type, exc_value, exc_traceback):
+        with self.lock:
+            timestamp = time.time()
+            raw_trace = traceback.format_exception(exc_type, exc_value, exc_traceback)
+            
+            event = {
+                'timestamp': timestamp,
+                'exception_type': exc_type.__name__,
+                'exception_value': str(exc_value),
+                'raw_traceback': raw_trace,
+                'russian_frames_at_time': list(self.tracer_state['russian_frames']),
+                'english_frames_at_time': list(self.tracer_state['english_frames'])
+            }
+            
+            self.semantic_events.append(event)
+            self._generate_validation_report(event)
+
+    def _generate_validation_report(self, event):
+        report = {
+            'event_id': hashlib.md5(str(event['timestamp']).encode()).hexdigest(),
+            'timestamp': event['timestamp'],
+            'exception_type': event['exception_type'],
+            'frame_differential': event['russian_frames_at_time'] and event['english_frames_at_time'],
+            'russian_frame_count': len(event['russian_frames_at_time']),
+            'english_frame_count': len(event['english_frames_at_time']),
+            'validation_status': 'divergent' if len(event['russian_frames_at_time']) != len(event['english_frames_at_time']) else 'aligned'
         }
+        self.validation_reports.append(report)
 
-    def clear_fractures(self) -> None:
-        """Clear recorded fractures"""
-        self.divergence_points.clear()
-        self.logger.info("Fracture records cleared")
+    def get_semantic_events(self):
+        with self.lock:
+            return list(self.semantic_events)
 
-    def dump_fracture_log(self, filename: str) -> None:
-        """Dump all fracture information to a JSON file"""
-        report = self.get_fracture_report()
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        self.logger.info(f"Fracture log dumped to {filename}")
+    def get_frame_differentials(self):
+        with self.lock:
+            return list(self.frame_differentials)
+
+    def get_validation_reports(self):
+        with self.lock:
+            return list(self.validation_reports)
+
+    def export_logs(self, filepath):
+        with self.lock:
+            export_data = {
+                'semantic_events': self.semantic_events,
+                'frame_differentials': self.frame_differentials,
+                'validation_reports': self.validation_reports
+            }
+            with open(filepath, 'w') as f:
+                json.dump(export_data, f, indent=2, default=str)
+
+# Global instance
+fracture_interrupter = FractureInterrupter()
+
+# Decorator for functions that need monitoring
+def monitor_semantic_divergence(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        fracture_interrupter.enable_hooks()
+        try:
+            result = func(*args, **kwargs)
+            return result
+        finally:
+            fracture_interrupter.disable_hooks()
+    return wrapper
+
+# Context manager for controlled monitoring
+@contextmanager
+def semantic_monitoring():
+    fracture_interrupter.enable_hooks()
+    try:
+        yield fracture_interrupter
+    finally:
+        fracture_interrupter.disable_hooks()
+
+# Initialize on module import
+fracture_interrupter.enable_hooks()
