@@ -1,150 +1,182 @@
-import argparse
-import json
-import os
-import sys
+import logging
 import time
-from typing import Dict, Any, Optional
-import numpy as np
-
-# Import semantic drift hooks
-try:
-    from memory.semantic_drift_hooks import SemanticDriftMonitor
-except ImportError:
-    # Mock implementation for standalone testing
-    class SemanticDriftMonitor:
-        def __init__(self):
-            self.drift_metrics = {"coherence_score": 1.0, "concept_drift": 0.0}
-        
-        def get_drift_metrics(self) -> Dict[str, float]:
-            # Simulate gradual drift for testing
-            self.drift_metrics["coherence_score"] = max(0.0, self.drift_metrics["coherence_score"] - 0.01)
-            self.drift_metrics["concept_drift"] = min(1.0, self.drift_metrics["concept_drift"] + 0.005)
-            return self.drift_metrics
-
-class CognitiveStack:
-    """Represents the active cognitive stack with English and Russian modes"""
-    
-    def __init__(self):
-        self.stack_data = {
-            "timestamp": time.time(),
-            "english_mode": {
-                "context": "Initial English cognitive context",
-                "active_concepts": ["translation", "semantics", "coherence"],
-                "processing_state": "active"
-            },
-            "russian_mode": {
-                "context": "Начальный русский когнитивный контекст",
-                "active_concepts": ["перевод", "семантика", "согласованность"],
-                "processing_state": "активный"
-            },
-            "inter_mode_coherence": 0.95
-        }
-    
-    def serialize(self) -> Dict[str, Any]:
-        """Serialize the entire cognitive stack for analysis"""
-        self.stack_data["timestamp"] = time.time()
-        return self.stack_data.copy()
-    
-    def induce_fracture(self):
-        """Deliberately perturb Russian-English coherence for testing"""
-        self.stack_data["english_mode"]["context"] = "Fractured English context - semantics disrupted"
-        self.stack_data["russian_mode"]["context"] = "Разрушенный русский контекст - семантика нарушена"
-        self.stack_data["inter_mode_coherence"] = 0.1
-        self.stack_data["fracture_induced"] = True
+import traceback
+from typing import Any, Dict, List, Optional, Tuple
+import json
 
 class FractureInterrupter:
-    """Monitors semantic drift and triggers cognitive stack serialization when thresholds are exceeded"""
-    
-    def __init__(self, coherence_threshold: float = 0.3, drift_threshold: float = 0.7):
-        self.semantic_monitor = SemanticDriftMonitor()
-        self.coherence_threshold = coherence_threshold
-        self.drift_threshold = drift_threshold
-        self.cognitive_stack = CognitiveStack()
-        self.fracture_occurred = False
+    def __init__(self, log_file: str = "fracture_trace.log"):
+        self.logger = self._setup_logger(log_file)
+        self.fracture_stack: List[Dict[str, Any]] = []
+        self.divergence_points: List[Dict[str, Any]] = []
         
-    def check_for_fracture(self) -> bool:
-        """Check if semantic drift metrics indicate a cognitive fracture"""
-        metrics = self.semantic_monitor.get_drift_metrics()
+    def _setup_logger(self, log_file: str) -> logging.Logger:
+        logger = logging.getLogger("FractureInterrupter")
+        logger.setLevel(logging.DEBUG)
         
-        # Check for critical coherence loss or concept drift
-        coherence_breach = metrics.get("coherence_score", 1.0) < self.coherence_threshold
-        drift_breach = metrics.get("concept_drift", 0.0) > self.drift_threshold
+        # Clear any existing handlers
+        logger.handlers.clear()
         
-        if coherence_breach or drift_breach:
-            self.fracture_occurred = True
+        # File handler for structured logging
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+        
+        # Console handler for immediate feedback
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.WARNING)
+        
+        # Structured formatter
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+        
+        return logger
+
+    def push_context(self, layer: str, operation: str, data: Any) -> None:
+        """Push processing context onto the stack"""
+        context = {
+            "timestamp": time.time(),
+            "layer": layer,
+            "operation": operation,
+            "data_snapshot": self._serialize_data(data),
+            "stack_depth": len(self.fracture_stack)
+        }
+        self.fracture_stack.append(context)
+        self.logger.debug(f"Context pushed: {layer}/{operation}")
+
+    def pop_context(self) -> Optional[Dict[str, Any]]:
+        """Pop processing context from the stack"""
+        if self.fracture_stack:
+            context = self.fracture_stack.pop()
+            self.logger.debug(f"Context popped: {context['layer']}/{context['operation']}")
+            return context
+        return None
+
+    def check_semantic_fracture(self, ru_data: Any, en_data: Any, 
+                              layer: str, operation: str) -> bool:
+        """Check for semantic divergence between Russian and English processing"""
+        divergence = not self._semantic_equivalence(ru_data, en_data)
+        
+        if divergence:
+            divergence_point = {
+                "timestamp": time.time(),
+                "layer": layer,
+                "operation": operation,
+                "ru_data": self._serialize_data(ru_data),
+                "en_data": self._serialize_data(en_data),
+                "stack_trace": self._capture_stack_trace(),
+                "context_stack": self._snapshot_context_stack()
+            }
+            
+            self.divergence_points.append(divergence_point)
+            self._log_fracture(divergence_point)
+            
+        return divergence
+
+    def _semantic_equivalence(self, ru_data: Any, en_data: Any) -> bool:
+        """Determine semantic equivalence between data structures"""
+        # Handle None cases
+        if ru_data is None and en_data is None:
             return True
-        return False
-    
-    def serialize_cognitive_stack(self, reason: str = "semantic_fracture") -> str:
-        """Serialize cognitive stack to file for post-mortem analysis"""
-        stack_data = self.cognitive_stack.serialize()
-        stack_data["fracture_reason"] = reason
-        stack_data["drift_metrics"] = self.semantic_monitor.get_drift_metrics()
-        
-        # Create output filename with timestamp
-        timestamp = int(time.time())
-        filename = f"cognitive_stack_dump_{timestamp}.json"
-        
-        # Save to analysis directory
-        os.makedirs("analysis", exist_ok=True)
-        filepath = os.path.join("analysis", filename)
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(stack_data, f, indent=2, ensure_ascii=False)
-        
-        return filepath
-    
-    def induce_test_fracture(self):
-        """Deliberately induce a fracture for testing purposes"""
-        self.cognitive_stack.induce_fracture()
-        self.fracture_occurred = True
-
-def main():
-    parser = argparse.ArgumentParser(description="Fracture Interrupter for Cognitive Stack Monitoring")
-    parser.add_argument('--induce-fracture', action='store_true', 
-                        help='Deliberately perturb Russian-English coherence for testing')
-    parser.add_argument('--coherence-threshold', type=float, default=0.3,
-                        help='Coherence score threshold for fracture detection (default: 0.3)')
-    parser.add_argument('--drift-threshold', type=float, default=0.7,
-                        help='Concept drift threshold for fracture detection (default: 0.7)')
-    parser.add_argument('--monitor-interval', type=float, default=1.0,
-                        help='Monitoring interval in seconds (default: 1.0)')
-    
-    args = parser.parse_args()
-    
-    # Initialize fracture interrupter
-    interrupter = FractureInterrupter(
-        coherence_threshold=args.coherence_threshold,
-        drift_threshold=args.drift_threshold
-    )
-    
-    # Handle deliberate fracture induction
-    if args.induce_fracture:
-        print("Inducing test fracture...")
-        interrupter.induce_test_fracture()
-        filepath = interrupter.serialize_cognitive_stack("test_fracture")
-        print(f"Test fracture induced. Cognitive stack serialized to: {filepath}")
-        return
-    
-    # Main monitoring loop
-    print("Starting fracture monitoring...")
-    print("Press Ctrl+C to stop monitoring")
-    
-    try:
-        while True:
-            if interrupter.check_for_fracture():
-                print("Cognitive fracture detected!")
-                filepath = interrupter.serialize_cognitive_stack()
-                print(f"Cognitive stack serialized to: {filepath}")
-                break
+        if ru_data is None or en_data is None:
+            return False
             
-            time.sleep(args.monitor_interval)
+        # Handle basic types
+        if isinstance(ru_data, (str, int, float, bool)) and isinstance(en_data, (str, int, float, bool)):
+            return ru_data == en_data
             
-    except KeyboardInterrupt:
-        print("\nMonitoring stopped by user")
-    except Exception as e:
-        print(f"Error during monitoring: {e}")
-        sys.exit(1)
+        # Handle lists
+        if isinstance(ru_data, list) and isinstance(en_data, list):
+            if len(ru_data) != len(en_data):
+                return False
+            return all(self._semantic_equivalence(ru_item, en_item) 
+                      for ru_item, en_item in zip(ru_data, en_data))
+                      
+        # Handle dicts
+        if isinstance(ru_data, dict) and isinstance(en_data, dict):
+            if set(ru_data.keys()) != set(en_data.keys()):
+                return False
+            return all(self._semantic_equivalence(ru_data[key], en_data[key]) 
+                      for key in ru_data.keys())
+                      
+        # Handle objects with __dict__
+        if hasattr(ru_data, '__dict__') and hasattr(en_data, '__dict__'):
+            return self._semantic_equivalence(ru_data.__dict__, en_data.__dict__)
+            
+        # Fallback to string comparison for complex objects
+        return str(ru_data) == str(en_data)
 
-if __name__ == "__main__":
-    main()
+    def _serialize_data(self, data: Any) -> Dict[str, Any]:
+        """Serialize data for logging"""
+        try:
+            if isinstance(data, (str, int, float, bool, type(None))):
+                return {"type": type(data).__name__, "value": data}
+            elif isinstance(data, (list, tuple)):
+                return {
+                    "type": type(data).__name__,
+                    "length": len(data),
+                    "sample": [self._serialize_data(item) for item in data[:3]] if data else []
+                }
+            elif isinstance(data, dict):
+                return {
+                    "type": "dict",
+                    "keys": list(data.keys())[:10],  # Limit keys for brevity
+                    "size": len(data)
+                }
+            else:
+                return {
+                    "type": type(data).__name__,
+                    "repr": str(data)[:200]  # Limit string length
+                }
+        except Exception as e:
+            return {"type": "unknown", "error": str(e)}
+
+    def _capture_stack_trace(self) -> List[str]:
+        """Capture current stack trace"""
+        return traceback.format_stack()[:-1]  # Exclude this method call
+
+    def _snapshot_context_stack(self) -> List[Dict[str, Any]]:
+        """Create a snapshot of the current context stack"""
+        return [ctx.copy() for ctx in self.fracture_stack]
+
+    def _log_fracture(self, divergence_point: Dict[str, Any]) -> None:
+        """Log fracture information in structured format"""
+        log_entry = {
+            "event_type": "semantic_fracture",
+            "timestamp": divergence_point["timestamp"],
+            "location": f"{divergence_point['layer']}.{divergence_point['operation']}",
+            "divergence_details": {
+                "ru_data": divergence_point["ru_data"],
+                "en_data": divergence_point["en_data"]
+            },
+            "stack_context": divergence_point["context_stack"],
+            "full_trace": divergence_point["stack_trace"]
+        }
+        
+        self.logger.warning(f"SEMANTIC FRACTURE DETECTED: {json.dumps(log_entry, indent=2)}")
+
+    def get_fracture_report(self) -> Dict[str, Any]:
+        """Generate a comprehensive fracture report"""
+        return {
+            "total_fractures": len(self.divergence_points),
+            "fractures": self.divergence_points,
+            "current_context_depth": len(self.fracture_stack),
+            "active_context": self.fracture_stack[-1] if self.fracture_stack else None
+        }
+
+    def clear_fractures(self) -> None:
+        """Clear recorded fractures"""
+        self.divergence_points.clear()
+        self.logger.info("Fracture records cleared")
+
+    def dump_fracture_log(self, filename: str) -> None:
+        """Dump all fracture information to a JSON file"""
+        report = self.get_fracture_report()
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        self.logger.info(f"Fracture log dumped to {filename}")
