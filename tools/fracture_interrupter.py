@@ -1,157 +1,120 @@
 import json
-import os
-import threading
-import time
+import logging
+from typing import Dict, Any, List, Tuple
 from datetime import datetime
-from typing import Any, Dict, List, Optional
-import traceback
+import numpy as np
+from semantic_drift_hooks import SemanticDriftMonitor
 
 class FractureInterrupter:
-    def __init__(self, log_file: str = "logs/fracture_events.json"):
-        self.log_file = log_file
-        self.lock = threading.Lock()
-        self.is_logging = False
-        self.event_buffer: List[Dict[str, Any]] = []
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.logger = logging.getLogger(__name__)
+        self.semantic_monitor = SemanticDriftMonitor(config.get('drift_threshold', 0.3))
+        self.divergence_log = []
         
-        # Ensure logs directory exists
-        os.makedirs(os.path.dirname(log_file) if os.path.dirname(log_file) else ".", exist_ok=True)
-        
-        # Initialize empty log file if it doesn't exist
-        if not os.path.exists(log_file):
-            with open(log_file, 'w') as f:
-                json.dump([], f)
-    
-    def start_logging(self):
-        """Start logging fracture events"""
-        with self.lock:
-            self.is_logging = True
-    
-    def stop_logging(self):
-        """Stop logging fracture events and flush buffer"""
-        with self.lock:
-            self.is_logging = False
-            self._flush_buffer()
-    
-    def record_fracture_event(self, validation_trace: Dict[str, Any], 
-                            context: Optional[Dict[str, Any]] = None):
-        """Record a fracture event with validation trace data"""
-        if not self.is_logging:
-            return
-            
-        event = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "event_type": "fracture_detected",
-            "validation_trace": validation_trace,
-            "context": context or {},
-            "thread_id": threading.get_ident(),
-            "process_id": os.getpid()
-        }
-        
-        with self.lock:
-            self.event_buffer.append(event)
-            
-            # Flush buffer if it gets too large
-            if len(self.event_buffer) >= 100:
-                self._flush_buffer()
-    
-    def record_divergence_event(self, expected: Any, actual: Any, 
-                              location: str, context: Optional[Dict[str, Any]] = None):
-        """Record a divergence event - a specific type of fracture"""
-        if not self.is_logging:
-            return
-            
-        trace = {
-            "type": "divergence",
-            "expected": expected,
-            "actual": actual,
-            "location": location,
-            "stack_trace": traceback.format_stack()[:-1]  # Exclude this call
-        }
-        
-        self.record_fracture_event(trace, context)
-    
-    def _flush_buffer(self):
-        """Write buffered events to log file"""
-        if not self.event_buffer:
-            return
-            
+    def process_russian_english_stacks(self, 
+                                     russian_stack: List[str], 
+                                     english_stack: List[str]) -> Dict[str, Any]:
+        """Process bilingual stacks with real-time divergence monitoring"""
         try:
-            # Read existing events
-            if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > 0:
-                with open(self.log_file, 'r') as f:
-                    try:
-                        existing_events = json.load(f)
-                    except json.JSONDecodeError:
-                        existing_events = []
-            else:
-                existing_events = []
+            # Initialize semantic representations
+            ru_embeddings = self._generate_embeddings(russian_stack, 'ru')
+            en_embeddings = self._generate_embeddings(english_stack, 'en')
             
-            # Append new events
-            existing_events.extend(self.event_buffer)
+            # Monitor semantic drift in real-time
+            drift_metrics = self.semantic_monitor.detect_drift(
+                ru_embeddings, 
+                en_embeddings
+            )
             
-            # Write back to file
-            with open(self.log_file, 'w') as f:
-                json.dump(existing_events, f, indent=2)
-                
-            self.event_buffer.clear()
+            # Check for critical divergence
+            if drift_metrics.get('divergence_score', 0) > self.config.get('interruption_threshold', 0.7):
+                self._log_divergence_event(russian_stack, english_stack, drift_metrics)
+                return self._handle_fracture_interruption(russian_stack, english_stack, drift_metrics)
+            
+            return {
+                'status': 'processing',
+                'drift_metrics': drift_metrics,
+                'stacks_aligned': True
+            }
             
         except Exception as e:
-            print(f"Warning: Failed to write fracture events to log: {e}")
-
-# Global instance
-_fracture_interrupter: Optional[FractureInterrupter] = None
-
-def get_fracture_interrupter() -> FractureInterrupter:
-    """Get or create the global fracture interrupter instance"""
-    global _fracture_interrupter
-    if _fracture_interrupter is None:
-        _fracture_interrupter = FractureInterrupter()
-    return _fracture_interrupter
-
-def start_fracture_logging():
-    """Start logging fracture events globally"""
-    interrupter = get_fracture_interrupter()
-    interrupter.start_logging()
-
-def stop_fracture_logging():
-    """Stop logging fracture events globally"""
-    interrupter = get_fracture_interrupter()
-    interrupter.stop_logging()
-
-def record_divergence(expected: Any, actual: Any, location: str, 
-                     context: Optional[Dict[str, Any]] = None):
-    """Record a divergence event globally"""
-    interrupter = get_fracture_interrupter()
-    interrupter.record_divergence_event(expected, actual, location, context)
-
-def record_fracture(validation_trace: Dict[str, Any], 
-                   context: Optional[Dict[str, Any]] = None):
-    """Record a fracture event globally"""
-    interrupter = get_fracture_interrupter()
-    interrupter.record_fracture_event(validation_trace, context)
-
-# Context manager for temporary fracture logging
-class FractureLogging:
-    def __enter__(self):
-        start_fracture_logging()
-        return self
+            self.logger.error(f"Error in fracture processing: {str(e)}")
+            return {'status': 'error', 'message': str(e)}
+    
+    def _generate_embeddings(self, stack: List[str], language: str) -> np.ndarray:
+        """Generate semantic embeddings for text stack"""
+        # Placeholder for actual embedding generation logic
+        # In practice, this would use a transformer model or similar
+        return np.random.rand(len(stack), 768)  # Mock embeddings
+    
+    def _log_divergence_event(self, 
+                            ru_stack: List[str], 
+                            en_stack: List[str], 
+                            metrics: Dict[str, Any]) -> None:
+        """Log structured divergence events as JSON"""
+        divergence_event = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'event_type': 'semantic_divergence',
+            'russian_stack': ru_stack,
+            'english_stack': en_stack,
+            'drift_metrics': metrics,
+            'severity': self._calculate_severity(metrics)
+        }
         
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        stop_fracture_logging()
+        self.divergence_log.append(divergence_event)
+        self.logger.info(json.dumps(divergence_event))
+    
+    def _calculate_severity(self, metrics: Dict[str, Any]) -> str:
+        """Calculate severity level based on drift metrics"""
+        score = metrics.get('divergence_score', 0)
+        if score > 0.8:
+            return 'critical'
+        elif score > 0.6:
+            return 'high'
+        elif score > 0.4:
+            return 'medium'
+        else:
+            return 'low'
+    
+    def _handle_fracture_interruption(self, 
+                                    ru_stack: List[str], 
+                                    en_stack: List[str], 
+                                    metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle fracture interruption with corrective actions"""
+        return {
+            'status': 'interrupted',
+            'action': 'stack_realignment_required',
+            'russian_stack': ru_stack,
+            'english_stack': en_stack,
+            'drift_metrics': metrics,
+            'correction_suggestion': self._suggest_correction(ru_stack, en_stack)
+        }
+    
+    def _suggest_correction(self, ru_stack: List[str], en_stack: List[str]) -> Dict[str, Any]:
+        """Suggest corrective actions for stack realignment"""
+        # Placeholder for actual correction logic
+        return {
+            'type': 'manual_review',
+            'affected_indices': list(range(min(len(ru_stack), len(en_stack)))),
+            'suggested_action': 'realign_semantic_context'
+        }
+    
+    def get_divergence_log(self) -> List[Dict[str, Any]]:
+        """Retrieve structured divergence log"""
+        return self.divergence_log
 
+# Example usage
 if __name__ == "__main__":
-    # Example usage
-    with FractureLogging():
-        # Simulate some divergence events
-        record_divergence(
-            expected={"status": "success", "value": 42},
-            actual={"status": "error", "value": None},
-            location="api_response_handler",
-            context={"endpoint": "/api/data", "user_id": 12345}
-        )
-        
-        record_fracture({
-            "type": "validation_failure",
-            "rule": "data_integrity",
-            "details": "Checksum mismatch detected"
-        })
+    logging.basicConfig(level=logging.INFO)
+    config = {
+        'drift_threshold': 0.3,
+        'interruption_threshold': 0.7
+    }
+    
+    interrupter = FractureInterrupter(config)
+    result = interrupter.process_russian_english_stacks(
+        ["Привет мир", "Как дела"],
+        ["Hello world", "How are you"]
+    )
+    print(json.dumps(result, indent=2))
