@@ -1,6 +1,5 @@
-import random
-import json
 import logging
+import random
 from typing import List, Tuple
 from datetime import datetime
 
@@ -8,98 +7,95 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class SimulatedBilingualInput:
+class BilingualInputSimulator:
     def __init__(self):
-        self.pairs_generated = 0
-        self.mismatch_types = [
-            'lexical_substitution',
-            'cultural_concept',
-            'grammatical_role',
-            'temporal_shift',
-            'spatial_conflict'
+        self.fracture_events = []
+        
+    def generate_semantic_fractures(self) -> List[Tuple[str, str]]:
+        """Generate Russian-English sentence pairs with subtle semantic misalignments"""
+        fracture_pairs = [
+            # Temporal mismatch
+            ("Я уже закончил работу.", "I haven't finished the work yet."),
+            # Negation divergence  
+            ("Он никогда не был здесь.", "He has always been here."),
+            # Quantifier mismatch
+            ("Несколько студентов пришли.", "No students came."),
+            # Causal relationship inversion
+            ("Из-за дождя дороги стали скользкими.", "The roads became slippery despite the sunny weather."),
+            # Modal verb contradiction
+            ("Мне нужно было уйти раньше.", "I didn't need to leave early."),
+            # Spatial preposition conflict
+            ("Книга лежит под столом.", "The book is on top of the table."),
+            # Agent-role reversal
+            ("Полиция арестовала протестующих.", "The protesters arrested the police."),
+            # Aspectual mismatch
+            ("Он читал книгу три часа.", "He read the book in three hours."),
+            # Evidentiality contradiction
+            ("Кажется, он болен.", "He is definitely healthy."),
+            # Scalar implicature violation
+            ("Некоторые студенты сдали экзамен.", "All students failed the exam.")
         ]
-        
-    def generate_mismatched_pair(self) -> Tuple[str, str, str]:
-        """Generate a single pair of sentences with deliberate semantic mismatch"""
-        mismatch_type = random.choice(self.mismatch_types)
-        
-        if mismatch_type == 'lexical_substitution':
-            # Same structure, different key word meaning
-            en_sentence = "The bank officer approved the loan."
-            ru_sentence = "Банковский офицер одобрил заем."  # 'bank' = river bank
+        return fracture_pairs
+    
+    def inject_fracture_pairs(self, pairs: List[Tuple[str, str]]) -> None:
+        """Inject fracture pairs into processing pipeline"""
+        for i, (ru, en) in enumerate(pairs):
+            event = {
+                'id': f'fracture_{i}_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+                'timestamp': datetime.now().isoformat(),
+                'russian': ru,
+                'english': en,
+                'type': self._classify_fracture_type(ru, en)
+            }
+            self.fracture_events.append(event)
+            logger.info(f"Injected fracture pair {event['id']}: {ru} | {en}")
             
-        elif mismatch_type == 'cultural_concept':
-            # Culturally specific concepts that don't translate directly
-            en_sentence = "He threw a curveball during the meeting."
-            ru_sentence = "Он бросил кривую подачу во время встречи."  # Baseball term in business context
+    def _classify_fracture_type(self, ru: str, en: str) -> str:
+        """Classify the type of semantic fracture"""
+        # Simplified classification based on content
+        if "не" in ru or "never" in en:
+            return "negation"
+        elif "уже" in ru or "yet" in en:
+            return "temporal"
+        elif "сколько" in ru or "several" in en:
+            return "quantifier" 
+        else:
+            return "other"
             
-        elif mismatch_type == 'grammatical_role':
-            # Same words, different grammatical function
-            en_sentence = "The chicken is ready to eat."
-            ru_sentence = "Курица готова к еде."  # Ambiguous: chicken ready to eat (food) vs chicken ready to eat (action)
-            
-        elif mismatch_type == 'temporal_shift':
-            # Time reference inconsistencies
-            en_sentence = "I will call you tomorrow morning."
-            ru_sentence = "Я позвоню тебе завтра вечером."  # tomorrow morning vs evening
-            
-        elif mismatch_type == 'spatial_conflict':
-            # Directional/positional inconsistencies
-            en_sentence = "The library is on the left side of the street."
-            ru_sentence = "Библиотека находится справа от улицы."  # left vs right
-            
-        return en_sentence, ru_sentence, mismatch_type
-        
-    def generate_batch(self, count: int = 10) -> List[Tuple[str, str, str]]:
-        """Generate a batch of mismatched sentence pairs"""
-        pairs = []
-        for _ in range(count):
-            pair = self.generate_mismatched_pair()
-            pairs.append(pair)
-            self.pairs_generated += 1
-        return pairs
-        
-    def log_interaction(self, en_sentence: str, ru_sentence: str, 
-                       mismatch_type: str, validator_response: dict):
-        """Log the input pair and validator response"""
-        log_entry = {
-            'timestamp': datetime.now().isoformat(),
-            'input': {
-                'english': en_sentence,
-                'russian': ru_sentence,
-                'mismatch_type': mismatch_type
-            },
-            'validator_response': validator_response,
-            'pair_id': self.pairs_generated
-        }
-        
-        logger.info(f"Mismatch Type: {mismatch_type}")
-        logger.info(f"English: {en_sentence}")
-        logger.info(f"Russian: {ru_sentence}")
-        logger.info(f"Validator Response: {json.dumps(validator_response, indent=2)}")
-        logger.info("-" * 50)
-        
-        return log_entry
+    def log_system_responses(self, responses: List[dict]) -> None:
+        """Log system responses to fracture events"""
+        for response in responses:
+            logger.info(f"System response to {response.get('event_id', 'unknown')}: "
+                       f"Validation: {response.get('validation_result', 'unknown')} | "
+                       f"Confidence: {response.get('confidence_score', 0.0)} | "
+                       f"Detected_issues: {response.get('detected_issues', [])}")
 
-# Example usage
-if __name__ == "__main__":
-    simulator = SimulatedBilingualInput()
+def simulate_bilingual_pipeline():
+    """Main simulation function"""
+    simulator = BilingualInputSimulator()
     
-    # Generate and log sample pairs
-    sample_pairs = simulator.generate_batch(5)
+    # Generate and inject fracture pairs
+    fracture_pairs = simulator.generate_semantic_fractures()
+    simulator.inject_fracture_pairs(fracture_pairs)
     
-    for en_sent, ru_sent, mismatch_type in sample_pairs:
-        # Simulate validator response (in real implementation, this would be actual validation)
-        validator_response = {
-            "semantically_aligned": False,
-            "confidence_score": random.uniform(0.1, 0.6),
-            "detected_fractures": [
-                {
-                    "type": mismatch_type,
-                    "position": "full_sentence",
-                    "severity": "high"
-                }
-            ]
+    # Simulate system responses (in real implementation, this would come from validators)
+    responses = []
+    for event in simulator.fracture_events:
+        # Mock responses with varying confidence levels
+        response = {
+            'event_id': event['id'],
+            'validation_result': random.choice(['rejected', 'flagged', 'accepted']),
+            'confidence_score': round(random.uniform(0.1, 0.9), 2),
+            'detected_issues': ['semantic_misalignment'] if random.random() > 0.3 else []
         }
-        
-        simulator.log_interaction(en_sent, ru_sent, mismatch_type, validator_response)
+        responses.append(response)
+    
+    # Log system responses
+    simulator.log_system_responses(responses)
+    
+    return simulator.fracture_events, responses
+
+if __name__ == "__main__":
+    events, responses = simulate_bilingual_pipeline()
+    print(f"Generated {len(events)} fracture events")
+    print(f"System processed {len(responses)} responses")
