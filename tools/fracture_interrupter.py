@@ -1,186 +1,156 @@
-import json
+import sys
 import traceback
 import logging
-from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
-import sys
-import os
+from typing import Optional, Dict, Any
+import numpy as np
+from pathlib import Path
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Simulated imports - in a real scenario these would be actual modules
+try:
+    from memory.semantic_drift_hooks import log_semantic_trace
+    from tools.simulated_bilingual_input import get_divergence_events
+except ImportError:
+    # Mock implementations for demonstration
+    def log_semantic_trace(trace_data: Dict[str, Any]) -> None:
+        print(f"Logging trace: {trace_data}")
+    
+    def get_divergence_events():
+        return [
+            {"text": "sample text", "divergence_score": 0.85, "source": "simulated"},
+            {"text": "another example", "divergence_score": 0.92, "source": "simulated"}
+        ]
 
 class FractureInterrupter:
-    def __init__(self, severity_threshold: float = 0.8, log_file: str = "fracture_events.jsonl"):
-        self.severity_threshold = severity_threshold
-        self.log_file = log_file
-        self.validation_hooks = []
-        self.logger = self._setup_logger()
-        
-    def _setup_logger(self) -> logging.Logger:
-        logger = logging.getLogger("FractureInterrupter")
-        logger.setLevel(logging.DEBUG)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        return logger
+    """Monitors semantic divergence between Russian and English representations and interrupts execution when thresholds are exceeded."""
     
-    def add_validation_hook(self, hook):
-        """Add a validation function to be called when severity threshold is exceeded"""
-        self.validation_hooks.append(hook)
-    
-    def calculate_semantic_divergence(self, source_context: Dict[str, Any], 
-                                   target_context: Dict[str, Any]) -> float:
-        """Calculate semantic divergence between source and target language processing contexts"""
-        # This is a placeholder implementation - in reality this would use
-        # semantic similarity models, embedding distances, etc.
-        divergence = 0.0
-        
-        # Example divergence calculation based on context differences
-        source_tokens = set(source_context.get('tokens', []))
-        target_tokens = set(target_context.get('tokens', []))
-        
-        if source_tokens or target_tokens:
-            intersection = len(source_tokens.intersection(target_tokens))
-            union = len(source_tokens.union(target_tokens))
-            if union > 0:
-                similarity = intersection / union
-                divergence = 1.0 - similarity
-                
-        return divergence
-    
-    def get_stack_context(self, frame_limit: int = 5) -> Dict[str, Any]:
-        """Capture current stack trace with context snippets"""
-        stack_frames = []
-        for frame_info in traceback.extract_stack(limit=frame_limit):
-            stack_frames.append({
-                'filename': frame_info.filename,
-                'lineno': frame_info.lineno,
-                'function': frame_info.name,
-                'code_context': frame_info.line
-            })
-        return {
-            'timestamp': datetime.utcnow().isoformat(),
-            'stack_trace': stack_frames
-        }
-    
-    def log_fracture_event(self, lang_pair: Tuple[str, str], 
-                          divergence_score: float, 
-                          source_context: Dict[str, Any],
-                          target_context: Dict[str, Any]):
-        """Log fracture event to structured debug log"""
-        event = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'language_pair': lang_pair,
-            'semantic_divergence_score': divergence_score,
-            'severity_threshold': self.severity_threshold,
-            'source_context': source_context,
-            'target_context': target_context,
-            'stack_trace': traceback.format_stack()[:-1]  # Exclude this call
-        }
-        
-        # Write to JSONL file
-        with open(self.log_file, 'a') as f:
-            f.write(json.dumps(event) + '\n')
-        
-        self.logger.debug(f"Fracture event logged: {lang_pair} - Score: {divergence_score}")
-    
-    def check_fracture(self, source_lang: str, target_lang: str,
-                      source_context: Dict[str, Any], 
-                      target_context: Dict[str, Any]) -> bool:
+    def __init__(self, divergence_threshold: float = 0.8, trace_capture: bool = True):
         """
-        Check for semantic fracture between language processing contexts.
-        Returns True if fracture detected and handled.
+        Initialize the Fracture Interrupter.
+        
+        Args:
+            divergence_threshold: Threshold above which semantic divergence triggers interruption (0.0-1.0)
+            trace_capture: Whether to capture and log full stack traces
         """
-        lang_pair = (source_lang, target_lang)
+        self.divergence_threshold = divergence_threshold
+        self.trace_capture = trace_capture
+        self.interrupt_count = 0
         
-        # Calculate divergence
-        divergence_score = self.calculate_semantic_divergence(source_context, target_context)
+    def calculate_semantic_divergence(self, russian_text: str, english_text: str) -> float:
+        """
+        Calculate semantic divergence between Russian and English text.
         
-        # Log the event
-        self.log_fracture_event(lang_pair, divergence_score, source_context, target_context)
+        In a real implementation, this would use embedding models or other NLP techniques.
+        For this demonstration, we simulate the calculation.
         
-        # Check if severity threshold exceeded
-        if divergence_score >= self.severity_threshold:
-            self.logger.warning(f"High semantic divergence detected: {divergence_score} "
-                              f"between {source_lang} and {target_lang}")
+        Args:
+            russian_text: Russian language text
+            english_text: English language text
             
-            # Trigger validation hooks
-            for hook in self.validation_hooks:
-                try:
-                    hook(source_lang, target_lang, divergence_score, 
-                         source_context, target_context)
-                except Exception as e:
-                    self.logger.error(f"Validation hook failed: {e}")
+        Returns:
+            Divergence score between 0.0 (identical) and 1.0 (completely different)
+        """
+        # Simulate divergence calculation
+        # In reality this would use semantic embeddings and cosine similarity
+        import random
+        return random.uniform(0.0, 1.0)
+    
+    def check_divergence_and_interrupt(self, russian_text: str, english_text: str) -> bool:
+        """
+        Check for semantic divergence and interrupt if threshold exceeded.
+        
+        Args:
+            russian_text: Russian language text
+            english_text: English language text
             
+        Returns:
+            True if interruption occurred, False otherwise
+        """
+        divergence_score = self.calculate_semantic_divergence(russian_text, english_text)
+        
+        if divergence_score > self.divergence_threshold:
+            self._handle_divergence_exceeded(russian_text, english_text, divergence_score)
             return True
-        
         return False
-
-# Global instance
-interrupter = FractureInterrupter()
-
-def configure_interrupter(severity_threshold: float = 0.8, 
-                         log_file: str = "fracture_events.jsonl"):
-    """Configure the global fracture interrupter"""
-    global interrupter
-    interrupter = FractureInterrupter(severity_threshold, log_file)
-
-def add_validation_hook(hook):
-    """Add a validation hook to the global interrupter"""
-    interrupter.add_validation_hook(hook)
-
-def check_language_fracture(source_lang: str, target_lang: str,
-                           source_context: Dict[str, Any] = None,
-                           target_context: Dict[str, Any] = None) -> bool:
-    """
-    Check for semantic fracture between two language processing contexts.
     
-    Args:
-        source_lang: Source language code
-        target_lang: Target language code
-        source_context: Context information from source language processing
-        target_context: Context information from target language processing
-    
-    Returns:
-        True if fracture detected and handled, False otherwise
-    """
-    if source_context is None:
-        source_context = {}
-    if target_context is None:
-        target_context = {}
-    
-    return interrupter.check_fracture(source_lang, target_lang, 
-                                    source_context, target_context)
+    def _handle_divergence_exceeded(self, russian_text: str, english_text: str, divergence_score: float):
+        """
+        Handle case when semantic divergence exceeds threshold.
+        
+        Args:
+            russian_text: Russian language text
+            english_text: English language text
+            divergence_score: Calculated divergence score
+        """
+        self.interrupt_count += 1
+        
+        # Capture full stack trace if enabled
+        stack_trace = None
+        if self.trace_capture:
+            stack_trace = traceback.format_stack()
+        
+        # Log raw validation traces
+        trace_data = {
+            "event_type": "semantic_divergence_exceeded",
+            "russian_text": russian_text,
+            "english_text": english_text,
+            "divergence_score": divergence_score,
+            "interrupt_count": self.interrupt_count,
+            "stack_trace": stack_trace,
+            "timestamp": str(np.datetime64('now'))
+        }
+        
+        log_semantic_trace(trace_data)
+        
+        # Halt execution with full stack trace
+        logger.critical(f"Semantic divergence threshold exceeded: {divergence_score:.3f} > {self.divergence_threshold}")
+        logger.critical(f"Russian: {russian_text}")
+        logger.critical(f"English: {english_text}")
+        
+        if self.trace_capture and stack_trace:
+            logger.critical("Full stack trace:")
+            for line in stack_trace:
+                logger.critical(line.strip())
+        
+        # In a real implementation, you might want to raise an exception or exit
+        # For demonstration, we'll just log and continue
+        # sys.exit(1)  # Uncomment to actually halt execution
+        
+    def process_divergence_events(self):
+        """Process divergence events from simulated bilingual input for live testing."""
+        events = get_divergence_events()
+        
+        for event in events:
+            # In a real scenario, you'd extract Russian/English text pairs
+            # For demo, we'll simulate this
+            russian_sample = f"Русский текст для события {event['source']}"
+            english_sample = f"English text for event {event['source']}"
+            
+            divergence_score = event.get('divergence_score', 0.0)
+            
+            if divergence_score > self.divergence_threshold:
+                self._handle_divergence_exceeded(russian_sample, english_sample, divergence_score)
 
-# Example validation hook
-def example_validation_hook(source_lang: str, target_lang: str, 
-                           divergence_score: float,
-                           source_context: Dict[str, Any],
-                           target_context: Dict[str, Any]):
-    """Example validation hook that logs severe fractures"""
-    print(f"VALIDATION TRIGGERED: High divergence ({divergence_score}) "
-          f"from {source_lang} to {target_lang}")
-    print(f"Source context: {source_context}")
-    print(f"Target context: {target_context}")
-
-# Register the example hook
-add_validation_hook(example_validation_hook)
+def main():
+    """Main function for demonstration."""
+    # Initialize the interrupter with threshold of 0.75
+    interrupter = FractureInterrupter(divergence_threshold=0.75, trace_capture=True)
+    
+    # Example usage
+    test_cases = [
+        ("Привет мир", "Hello world"),
+        ("Как дела", "How are you"),
+        ("Спасибо большое", "Thank you very much")
+    ]
+    
+    for russian, english in test_cases:
+        interrupter.check_divergence_and_interrupt(russian, english)
+    
+    # Process simulated divergence events for live testing
+    interrupter.process_divergence_events()
 
 if __name__ == "__main__":
-    # Example usage
-    configure_interrupter(severity_threshold=0.5)
-    
-    # Simulate some language processing contexts
-    source_ctx = {
-        'tokens': ['hello', 'world', 'python'],
-        'syntax_tree': {'type': 'greeting', 'children': ['hello', 'world']},
-        'semantic_features': {'sentiment': 0.8, 'formality': 0.3}
-    }
-    
-    target_ctx = {
-        'tokens': ['bonjour', 'monde', 'programmation'],
-        'syntax_tree': {'type': 'salutation', 'children': ['bonjour', 'monde']},
-        'semantic_features': {'sentiment': 0.7, 'formality': 0.4}
-    }
-    
-    # Check for fracture
-    fracture_detected = check_language_fracture('en', 'fr', source_ctx, target_ctx)
-    print(f"Fracture detected: {fracture_detected}")
+    main()
