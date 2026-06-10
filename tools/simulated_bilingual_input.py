@@ -1,208 +1,224 @@
 import json
-import random
 import logging
-from typing import Tuple, List, Dict
-from pathlib import Path
+import random
+import time
+from typing import Dict, List, Optional, Tuple
 
 # Configure logging
 logging.basicConfig(
-    filename='validation_traces.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('simulated_bilingual_input.log'),
+        logging.StreamHandler()
+    ]
 )
+logger = logging.getLogger('simulated_bilingual_input')
 
-class BilingualInputGenerator:
+class SemanticDivergenceDetector:
+    """Detects semantic divergence between bilingual inputs"""
+    
+    def __init__(self, threshold: float = 0.7):
+        self.threshold = threshold
+        self.divergence_count = 0
+        
+    def calculate_semantic_distance(self, text1: str, text2: str) -> float:
+        """
+        Calculate semantic distance between two texts.
+        Returns a value between 0 (identical) and 1 (completely different).
+        """
+        # Simplified semantic distance calculation
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 and not words2:
+            return 0.0
+            
+        union = words1.union(words2)
+        intersection = words1.intersection(words2)
+        
+        if not union:
+            return 1.0
+            
+        similarity = len(intersection) / len(union)
+        return 1.0 - similarity
+    
+    def check_divergence(self, source_text: str, target_text: str) -> bool:
+        """Check if semantic divergence exceeds threshold"""
+        distance = self.calculate_semantic_distance(source_text, target_text)
+        is_divergent = distance > self.threshold
+        
+        if is_divergent:
+            self.divergence_count += 1
+            logger.warning(f"Semantic divergence detected: {distance:.3f} (threshold: {self.threshold})")
+            logger.info(f"Source: {source_text}")
+            logger.info(f"Target: {target_text}")
+        
+        return is_divergent
+
+class FractureInterrupter:
+    """Handles semantic fracture interrupts"""
+    
     def __init__(self):
-        self.semantic_mismatch_templates = [
-            ("The {} is {}.", "El {} está {}."),  # Correct translation template
-            ("The {} {} the {}.", "El {} {} el {}."),  # Correct translation template
-            ("{} {} {}.", "{} {} {}."),  # Generic structure
-        ]
+        self.interrupt_count = 0
         
-        # Semantic mismatch patterns that should trigger fracture detection
-        self.mismatch_patterns = [
-            # Pattern: English subject doesn't match Spanish subject
-            {
-                "en": "The {} {}.",
-                "es": "El {} {}.",
-                "mismatch": "subject"
-            },
-            # Pattern: Different verbs
-            {
-                "en": "The {} {} the {}.",
-                "es": "El {} {} el {}.",
-                "mismatch": "verb"
-            },
-            # Pattern: Different objects
-            {
-                "en": "The {} {} the {}.",
-                "es": "El {} {} el {}.",
-                "mismatch": "object"
-            },
-            # Pattern: Different sentence structures
-            {
-                "en": "{} {} {}.",
-                "es": "{} {} {} {}.",
-                "mismatch": "structure"
-            }
-        ]
+    def trigger_interrupt(self, source_text: str, target_text: str, divergence_score: float):
+        """Trigger fracture interrupt when semantic mismatch exceeds threshold"""
+        self.interrupt_count += 1
+        logger.critical(f"Fracture interrupt triggered! Count: {self.interrupt_count}")
+        logger.critical(f"Divergence score: {divergence_score}")
+        logger.critical(f"Source text: {source_text}")
+        logger.critical(f"Target text: {target_text}")
         
-        # Vocabulary for generation
-        self.vocabulary = {
-            "nouns": ["cat", "dog", "house", "car", "tree", "book", "computer", "phone"],
-            "verbs": ["runs", "jumps", "eats", "drives", "reads", "writes", "sleeps", "works"],
-            "adjectives": ["big", "small", "red", "blue", "fast", "slow", "old", "new"],
-            "articles": ["the", "a", "an"]
+        # Log interrupt event for unified runtime validator
+        interrupt_data = {
+            "event_type": "fracture_interrupt",
+            "timestamp": time.time(),
+            "divergence_score": divergence_score,
+            "source_text": source_text,
+            "target_text": target_text,
+            "interrupt_count": self.interrupt_count
         }
         
-        self.spanish_vocab = {
-            "nouns": ["gato", "perro", "casa", "coche", "árbol", "libro", "computadora", "teléfono"],
-            "verbs": ["corre", "salta", "come", "maneja", "lee", "escribe", "duerme", "trabaja"],
-            "adjectives": ["grande", "pequeño", "rojo", "azul", "rápido", "lento", "viejo", "nuevo"],
-            "articles": ["el", "un", "una"]
+        with open('fracture_interrupts.log', 'a') as f:
+            f.write(json.dumps(interrupt_data) + '\n')
+
+class SimulatedBilingualInput:
+    """Simulates bilingual input processing with divergence detection"""
+    
+    def __init__(self, divergence_threshold: float = 0.7):
+        self.divergence_detector = SemanticDivergenceDetector(divergence_threshold)
+        self.fracture_interrupter = FractureInterrupter()
+        self.processed_pairs = 0
+        self.divergent_pairs = 0
+        
+        # Sample bilingual text pairs for simulation
+        self.text_pairs = [
+            ("Hello world", "Hola mundo"),
+            ("Good morning", "Buenos días"),
+            ("Thank you very much", "Muchas gracias"),
+            ("How are you today", "¿Cómo estás hoy"),
+            ("The weather is nice", "El clima es agradable"),
+            ("I need help", "Necesito ayuda"),
+            ("This is a test", "Esto es una prueba"),
+            ("Semantic divergence", "Divergencia semántica"),
+            ("Artificial intelligence", "Inteligencia artificial"),
+            ("Machine learning", "Aprendizaje automático"),
+            # Intentionally divergent pairs for testing
+            ("The cat is sleeping", "El perro está corriendo"),
+            ("I love programming", "Me gusta cocinar"),
+            ("Today is sunny", "Hoy está lloviendo"),
+        ]
+        
+    def generate_bilingual_pair(self) -> Tuple[str, str]:
+        """Generate a bilingual text pair"""
+        return random.choice(self.text_pairs)
+    
+    def introduce_semantic_divergence(self, source_text: str, target_text: str, probability: float = 0.3) -> Tuple[str, str]:
+        """Intentionally introduce semantic divergence for testing purposes"""
+        if random.random() < probability:
+            # Replace target text with unrelated content
+            unrelated_texts = [
+                "Completely unrelated sentence",
+                "This has nothing to do with the source",
+                "Random words with no semantic connection",
+                "Semantic mismatch for testing purposes"
+            ]
+            new_target = random.choice(unrelated_texts)
+            logger.debug(f"Introducing semantic divergence: '{target_text}' -> '{new_target}'")
+            return source_text, new_target
+        return source_text, target_text
+    
+    def process_input_pair(self) -> Dict:
+        """Process a single bilingual input pair"""
+        source_text, target_text = self.generate_bilingual_pair()
+        
+        # Occasionally introduce semantic divergence for testing
+        source_text, target_text = self.introduce_semantic_divergence(source_text, target_text)
+        
+        # Check for semantic divergence
+        is_divergent = self.divergence_detector.check_divergence(source_text, target_text)
+        
+        # Log processing event
+        processing_data = {
+            "event_type": "input_processing",
+            "timestamp": time.time(),
+            "source_text": source_text,
+            "target_text": target_text,
+            "is_divergent": is_divergent,
+            "divergence_count": self.divergence_detector.divergence_count,
+            "processed_pairs": self.processed_pairs + 1
         }
-
-    def generate_semantically_aligned_pair(self) -> Tuple[str, str]:
-        """Generate a semantically correct English-Spanish pair"""
-        pattern = random.choice(self.semantic_mismatch_templates)
         
-        # Fill in with matching vocabulary
-        noun_idx = random.randint(0, len(self.vocabulary["nouns"]) - 1)
-        verb_idx = random.randint(0, len(self.vocabulary["verbs"]) - 1)
-        adj_idx = random.randint(0, len(self.vocabulary["adjectives"]) - 1)
+        with open('bilingual_processing.log', 'a') as f:
+            f.write(json.dumps(processing_data) + '\n')
         
-        en_sentence = pattern[0].format(
-            self.vocabulary["nouns"][noun_idx],
-            self.vocabulary["verbs"][verb_idx] if "{}" in pattern[0] and pattern[0].count("{}") > 1 else 
-            self.vocabulary["adjectives"][adj_idx]
-        )
+        self.processed_pairs += 1
+        if is_divergent:
+            self.divergent_pairs += 1
+            divergence_score = self.divergence_detector.calculate_semantic_distance(source_text, target_text)
+            self.fracture_interrupter.trigger_interrupt(source_text, target_text, divergence_score)
         
-        es_sentence = pattern[1].format(
-            self.spanish_vocab["nouns"][noun_idx],
-            self.spanish_vocab["verbs"][verb_idx] if "{}" in pattern[1] and pattern[1].count("{}") > 1 else 
-            self.spanish_vocab["adjectives"][adj_idx]
-        )
+        return processing_data
+    
+    def run_simulation(self, iterations: int = 10, delay: float = 1.0):
+        """Run the bilingual input simulation"""
+        logger.info(f"Starting bilingual input simulation with {iterations} iterations")
+        logger.info(f"Divergence threshold: {self.divergence_detector.threshold}")
         
-        return en_sentence, es_sentence
-
-    def generate_semantic_mismatch_pair(self) -> Tuple[str, str]:
-        """Generate a deliberately semantically mismatched pair"""
-        pattern = random.choice(self.mismatch_patterns)
-        
-        # Select vocabulary indices
-        noun_idx_en = random.randint(0, len(self.vocabulary["nouns"]) - 1)
-        noun_idx_es = random.randint(0, len(self.spanish_vocab["nouns"]) - 1)
-        verb_idx_en = random.randint(0, len(self.vocabulary["verbs"]) - 1)
-        verb_idx_es = random.randint(0, len(self.spanish_vocab["verbs"]) - 1)
-        adj_idx_en = random.randint(0, len(self.vocabulary["adjectives"]) - 1)
-        adj_idx_es = random.randint(0, len(self.spanish_vocab["adjectives"]) - 1)
-        
-        # Create mismatch based on pattern
-        mismatch_type = pattern["mismatch"]
-        
-        if mismatch_type == "subject":
-            # Different subjects
-            en_sentence = pattern["en"].format(
-                self.vocabulary["nouns"][noun_idx_en],
-                self.vocabulary["verbs"][verb_idx_en]
-            )
-            es_sentence = pattern["es"].format(
-                self.spanish_vocab["nouns"][noun_idx_es],  # Mismatched subject
-                self.spanish_vocab["verbs"][verb_idx_es]
-            )
-        elif mismatch_type == "verb":
-            # Different verbs
-            en_sentence = pattern["en"].format(
-                self.vocabulary["nouns"][noun_idx_en],
-                self.vocabulary["verbs"][verb_idx_en]
-            )
-            es_sentence = pattern["es"].format(
-                self.spanish_vocab["nouns"][noun_idx_es],
-                self.spanish_vocab["verbs"][verb_idx_es]  # Mismatched verb
-            )
-        elif mismatch_type == "object":
-            # Different objects
-            en_sentence = pattern["en"].format(
-                self.vocabulary["nouns"][noun_idx_en],
-                self.vocabulary["verbs"][verb_idx_en],
-                self.vocabulary["nouns"][random.randint(0, len(self.vocabulary["nouns"]) - 1)]
-            )
-            es_sentence = pattern["es"].format(
-                self.spanish_vocab["nouns"][noun_idx_es],
-                self.spanish_vocab["verbs"][verb_idx_es],
-                self.spanish_vocab["nouns"][random.randint(0, len(self.spanish_vocab["nouns"]) - 1)]  # Mismatched object
-            )
-        elif mismatch_type == "structure":
-            # Different sentence structures
-            en_sentence = pattern["en"].format(
-                self.vocabulary["articles"][random.randint(0, len(self.vocabulary["articles"]) - 1)],
-                self.vocabulary["nouns"][noun_idx_en],
-                self.vocabulary["verbs"][verb_idx_en]
-            )
-            es_sentence = pattern["es"].format(
-                self.spanish_vocab["articles"][random.randint(0, len(self.spanish_vocab["articles"]) - 1)],
-                self.spanish_vocab["adjectives"][adj_idx_es],
-                self.spanish_vocab["nouns"][noun_idx_es],
-                self.spanish_vocab["verbs"][verb_idx_es]
-            )
-        else:
-            # Default case with some mismatch
-            en_sentence = pattern["en"].format(
-                self.vocabulary["nouns"][noun_idx_en],
-                self.vocabulary["verbs"][verb_idx_en]
-            )
-            es_sentence = pattern["es"].format(
-                self.spanish_vocab["nouns"][noun_idx_es],
-                self.spanish_vocab["verbs"][verb_idx_es]
-            )
+        for i in range(iterations):
+            logger.info(f"Processing iteration {i+1}/{iterations}")
             
-        return en_sentence, es_sentence
-
-    def generate_adversarial_pairs(self, count: int = 100) -> List[Dict]:
-        """Generate adversarial bilingual pairs with semantic mismatches"""
-        pairs = []
-        
-        for i in range(count):
-            # Generate both aligned and mismatched pairs
-            if random.random() < 0.5:
-                # Generate semantically aligned pair
-                en_text, es_text = self.generate_semantically_aligned_pair()
-                is_mismatched = False
-            else:
-                # Generate semantically mismatched pair
-                en_text, es_text = self.generate_semantic_mismatch_pair()
-                is_mismatched = True
+            try:
+                result = self.process_input_pair()
+                logger.info(f"Processed pair: {result['source_text']} <-> {result['target_text']}")
                 
-            pair_data = {
-                "id": i,
-                "english": en_text,
-                "spanish": es_text,
-                "is_mismatched": is_mismatched,
-                "timestamp": __import__('datetime').datetime.now().isoformat()
-            }
+                if result['is_divergent']:
+                    logger.warning("Divergent pair detected and logged")
+                
+            except Exception as e:
+                logger.error(f"Error processing input pair: {e}")
+                continue
             
-            pairs.append(pair_data)
-            
-            # Log the generated pair for analysis
-            logging.info(f"Generated pair {i}: EN='{en_text}' | ES='{es_text}' | Mismatched={is_mismatched}")
-            
-        return pairs
-
-    def save_pairs_to_file(self, pairs: List[Dict], filename: str = "bilingual_input_pairs.json"):
-        """Save generated pairs to a JSON file"""
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(pairs, f, indent=2, ensure_ascii=False)
-        logging.info(f"Saved {len(pairs)} pairs to {filename}")
+            # Optional delay between iterations
+            if delay > 0:
+                time.sleep(delay)
+        
+        # Log final statistics
+        stats = {
+            "event_type": "simulation_summary",
+            "timestamp": time.time(),
+            "total_processed": self.processed_pairs,
+            "divergent_pairs": self.divergent_pairs,
+            "fracture_interrupts": self.fracture_interrupter.interrupt_count,
+            "divergence_rate": self.divergent_pairs / self.processed_pairs if self.processed_pairs > 0 else 0
+        }
+        
+        logger.info("Simulation completed")
+        logger.info(f"Total processed pairs: {stats['total_processed']}")
+        logger.info(f"Divergent pairs: {stats['divergent_pairs']}")
+        logger.info(f"Fracture interrupts: {stats['fracture_interrupts']}")
+        logger.info(f"Divergence rate: {stats['divergence_rate']:.2%}")
+        
+        with open('simulation_summary.log', 'a') as f:
+            f.write(json.dumps(stats) + '\n')
+        
+        return stats
 
 def main():
-    """Main function to generate and save adversarial bilingual input pairs"""
-    generator = BilingualInputGenerator()
+    """Main function to run the simulated bilingual input"""
+    import argparse
     
-    # Generate 200 adversarial pairs
-    pairs = generator.generate_adversarial_pairs(200)
+    parser = argparse.ArgumentParser(description='Simulated Bilingual Input Processor')
+    parser.add_argument('--iterations', type=int, default=10, help='Number of iterations to run')
+    parser.add_argument('--threshold', type=float, default=0.7, help='Semantic divergence threshold')
+    parser.add_argument('--delay', type=float, default=1.0, help='Delay between iterations in seconds')
     
-    # Save to file
-    generator.save_pairs_to_file(pairs)
+    args = parser.parse_args()
     
-    # Log summary
-    mismatched_count = sum(1
+    # Initialize and run simulation
+    simulator = SimulatedBilingualInput(divergence_threshold=args.threshold)
+    simulator.run_simulation(iterations=args.iterations, delay=args.delay)
+
+if __name__ == "__main__":
+    main()
