@@ -1,156 +1,150 @@
+import argparse
+import json
+import os
 import sys
-import traceback
-import logging
-from typing import Optional, Dict, Any
+import time
+from typing import Dict, Any, Optional
 import numpy as np
-from pathlib import Path
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Simulated imports - in a real scenario these would be actual modules
+# Import semantic drift hooks
 try:
-    from memory.semantic_drift_hooks import log_semantic_trace
-    from tools.simulated_bilingual_input import get_divergence_events
+    from memory.semantic_drift_hooks import SemanticDriftMonitor
 except ImportError:
-    # Mock implementations for demonstration
-    def log_semantic_trace(trace_data: Dict[str, Any]) -> None:
-        print(f"Logging trace: {trace_data}")
+    # Mock implementation for standalone testing
+    class SemanticDriftMonitor:
+        def __init__(self):
+            self.drift_metrics = {"coherence_score": 1.0, "concept_drift": 0.0}
+        
+        def get_drift_metrics(self) -> Dict[str, float]:
+            # Simulate gradual drift for testing
+            self.drift_metrics["coherence_score"] = max(0.0, self.drift_metrics["coherence_score"] - 0.01)
+            self.drift_metrics["concept_drift"] = min(1.0, self.drift_metrics["concept_drift"] + 0.005)
+            return self.drift_metrics
+
+class CognitiveStack:
+    """Represents the active cognitive stack with English and Russian modes"""
     
-    def get_divergence_events():
-        return [
-            {"text": "sample text", "divergence_score": 0.85, "source": "simulated"},
-            {"text": "another example", "divergence_score": 0.92, "source": "simulated"}
-        ]
+    def __init__(self):
+        self.stack_data = {
+            "timestamp": time.time(),
+            "english_mode": {
+                "context": "Initial English cognitive context",
+                "active_concepts": ["translation", "semantics", "coherence"],
+                "processing_state": "active"
+            },
+            "russian_mode": {
+                "context": "Начальный русский когнитивный контекст",
+                "active_concepts": ["перевод", "семантика", "согласованность"],
+                "processing_state": "активный"
+            },
+            "inter_mode_coherence": 0.95
+        }
+    
+    def serialize(self) -> Dict[str, Any]:
+        """Serialize the entire cognitive stack for analysis"""
+        self.stack_data["timestamp"] = time.time()
+        return self.stack_data.copy()
+    
+    def induce_fracture(self):
+        """Deliberately perturb Russian-English coherence for testing"""
+        self.stack_data["english_mode"]["context"] = "Fractured English context - semantics disrupted"
+        self.stack_data["russian_mode"]["context"] = "Разрушенный русский контекст - семантика нарушена"
+        self.stack_data["inter_mode_coherence"] = 0.1
+        self.stack_data["fracture_induced"] = True
 
 class FractureInterrupter:
-    """Monitors semantic divergence between Russian and English representations and interrupts execution when thresholds are exceeded."""
+    """Monitors semantic drift and triggers cognitive stack serialization when thresholds are exceeded"""
     
-    def __init__(self, divergence_threshold: float = 0.8, trace_capture: bool = True):
-        """
-        Initialize the Fracture Interrupter.
+    def __init__(self, coherence_threshold: float = 0.3, drift_threshold: float = 0.7):
+        self.semantic_monitor = SemanticDriftMonitor()
+        self.coherence_threshold = coherence_threshold
+        self.drift_threshold = drift_threshold
+        self.cognitive_stack = CognitiveStack()
+        self.fracture_occurred = False
         
-        Args:
-            divergence_threshold: Threshold above which semantic divergence triggers interruption (0.0-1.0)
-            trace_capture: Whether to capture and log full stack traces
-        """
-        self.divergence_threshold = divergence_threshold
-        self.trace_capture = trace_capture
-        self.interrupt_count = 0
+    def check_for_fracture(self) -> bool:
+        """Check if semantic drift metrics indicate a cognitive fracture"""
+        metrics = self.semantic_monitor.get_drift_metrics()
         
-    def calculate_semantic_divergence(self, russian_text: str, english_text: str) -> float:
-        """
-        Calculate semantic divergence between Russian and English text.
+        # Check for critical coherence loss or concept drift
+        coherence_breach = metrics.get("coherence_score", 1.0) < self.coherence_threshold
+        drift_breach = metrics.get("concept_drift", 0.0) > self.drift_threshold
         
-        In a real implementation, this would use embedding models or other NLP techniques.
-        For this demonstration, we simulate the calculation.
-        
-        Args:
-            russian_text: Russian language text
-            english_text: English language text
-            
-        Returns:
-            Divergence score between 0.0 (identical) and 1.0 (completely different)
-        """
-        # Simulate divergence calculation
-        # In reality this would use semantic embeddings and cosine similarity
-        import random
-        return random.uniform(0.0, 1.0)
-    
-    def check_divergence_and_interrupt(self, russian_text: str, english_text: str) -> bool:
-        """
-        Check for semantic divergence and interrupt if threshold exceeded.
-        
-        Args:
-            russian_text: Russian language text
-            english_text: English language text
-            
-        Returns:
-            True if interruption occurred, False otherwise
-        """
-        divergence_score = self.calculate_semantic_divergence(russian_text, english_text)
-        
-        if divergence_score > self.divergence_threshold:
-            self._handle_divergence_exceeded(russian_text, english_text, divergence_score)
+        if coherence_breach or drift_breach:
+            self.fracture_occurred = True
             return True
         return False
     
-    def _handle_divergence_exceeded(self, russian_text: str, english_text: str, divergence_score: float):
-        """
-        Handle case when semantic divergence exceeds threshold.
+    def serialize_cognitive_stack(self, reason: str = "semantic_fracture") -> str:
+        """Serialize cognitive stack to file for post-mortem analysis"""
+        stack_data = self.cognitive_stack.serialize()
+        stack_data["fracture_reason"] = reason
+        stack_data["drift_metrics"] = self.semantic_monitor.get_drift_metrics()
         
-        Args:
-            russian_text: Russian language text
-            english_text: English language text
-            divergence_score: Calculated divergence score
-        """
-        self.interrupt_count += 1
+        # Create output filename with timestamp
+        timestamp = int(time.time())
+        filename = f"cognitive_stack_dump_{timestamp}.json"
         
-        # Capture full stack trace if enabled
-        stack_trace = None
-        if self.trace_capture:
-            stack_trace = traceback.format_stack()
+        # Save to analysis directory
+        os.makedirs("analysis", exist_ok=True)
+        filepath = os.path.join("analysis", filename)
         
-        # Log raw validation traces
-        trace_data = {
-            "event_type": "semantic_divergence_exceeded",
-            "russian_text": russian_text,
-            "english_text": english_text,
-            "divergence_score": divergence_score,
-            "interrupt_count": self.interrupt_count,
-            "stack_trace": stack_trace,
-            "timestamp": str(np.datetime64('now'))
-        }
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(stack_data, f, indent=2, ensure_ascii=False)
         
-        log_semantic_trace(trace_data)
-        
-        # Halt execution with full stack trace
-        logger.critical(f"Semantic divergence threshold exceeded: {divergence_score:.3f} > {self.divergence_threshold}")
-        logger.critical(f"Russian: {russian_text}")
-        logger.critical(f"English: {english_text}")
-        
-        if self.trace_capture and stack_trace:
-            logger.critical("Full stack trace:")
-            for line in stack_trace:
-                logger.critical(line.strip())
-        
-        # In a real implementation, you might want to raise an exception or exit
-        # For demonstration, we'll just log and continue
-        # sys.exit(1)  # Uncomment to actually halt execution
-        
-    def process_divergence_events(self):
-        """Process divergence events from simulated bilingual input for live testing."""
-        events = get_divergence_events()
-        
-        for event in events:
-            # In a real scenario, you'd extract Russian/English text pairs
-            # For demo, we'll simulate this
-            russian_sample = f"Русский текст для события {event['source']}"
-            english_sample = f"English text for event {event['source']}"
-            
-            divergence_score = event.get('divergence_score', 0.0)
-            
-            if divergence_score > self.divergence_threshold:
-                self._handle_divergence_exceeded(russian_sample, english_sample, divergence_score)
+        return filepath
+    
+    def induce_test_fracture(self):
+        """Deliberately induce a fracture for testing purposes"""
+        self.cognitive_stack.induce_fracture()
+        self.fracture_occurred = True
 
 def main():
-    """Main function for demonstration."""
-    # Initialize the interrupter with threshold of 0.75
-    interrupter = FractureInterrupter(divergence_threshold=0.75, trace_capture=True)
+    parser = argparse.ArgumentParser(description="Fracture Interrupter for Cognitive Stack Monitoring")
+    parser.add_argument('--induce-fracture', action='store_true', 
+                        help='Deliberately perturb Russian-English coherence for testing')
+    parser.add_argument('--coherence-threshold', type=float, default=0.3,
+                        help='Coherence score threshold for fracture detection (default: 0.3)')
+    parser.add_argument('--drift-threshold', type=float, default=0.7,
+                        help='Concept drift threshold for fracture detection (default: 0.7)')
+    parser.add_argument('--monitor-interval', type=float, default=1.0,
+                        help='Monitoring interval in seconds (default: 1.0)')
     
-    # Example usage
-    test_cases = [
-        ("Привет мир", "Hello world"),
-        ("Как дела", "How are you"),
-        ("Спасибо большое", "Thank you very much")
-    ]
+    args = parser.parse_args()
     
-    for russian, english in test_cases:
-        interrupter.check_divergence_and_interrupt(russian, english)
+    # Initialize fracture interrupter
+    interrupter = FractureInterrupter(
+        coherence_threshold=args.coherence_threshold,
+        drift_threshold=args.drift_threshold
+    )
     
-    # Process simulated divergence events for live testing
-    interrupter.process_divergence_events()
+    # Handle deliberate fracture induction
+    if args.induce_fracture:
+        print("Inducing test fracture...")
+        interrupter.induce_test_fracture()
+        filepath = interrupter.serialize_cognitive_stack("test_fracture")
+        print(f"Test fracture induced. Cognitive stack serialized to: {filepath}")
+        return
+    
+    # Main monitoring loop
+    print("Starting fracture monitoring...")
+    print("Press Ctrl+C to stop monitoring")
+    
+    try:
+        while True:
+            if interrupter.check_for_fracture():
+                print("Cognitive fracture detected!")
+                filepath = interrupter.serialize_cognitive_stack()
+                print(f"Cognitive stack serialized to: {filepath}")
+                break
+            
+            time.sleep(args.monitor_interval)
+            
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped by user")
+    except Exception as e:
+        print(f"Error during monitoring: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
